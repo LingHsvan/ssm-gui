@@ -1,182 +1,71 @@
-> [!IMPORTANT]
-> **As the core features are now complete, the main branch of this project will only receive minor bug fixes and no major functional changes.**
-> 
-> **For new feature development, please head over to the [test/automation](https://github.com/hj6hki123/ssm-gui/tree/test/automation) branch.**
-> 
-> **This branch is under active development, focusing on a fully autonomous 'unattended mode' to achieve a completely hands-off user experience.**
 <p align="center">
-    <a href="https://github.com/hj6hki123/ssm-gui">
-        <img src="imgs/page.png" alt="ssm-gui-banner"/>
-    </a>
-    <br>
-    <strong>A Web-based GUI for automated mobile rhythm game playback and chart parsing.</strong>
+  <strong>SSM GUI — 个人修改版</strong><br>
+  基于 Web 的音游自动打歌与谱面解析控制台(BanG Dream! / Project Sekai)
 </p>
 
+# 关于本仓库
 
-# SSM Web GUI (Star Stone Miner Web GUI Version)
+这是 [hj6hki123/ssm-gui](https://github.com/hj6hki123/ssm-gui) v3.6.1 的**个人修改版 fork**(上游则源自 [kvarenzn/ssm](https://github.com/kvarenzn/ssm)),遵循同一许可 **GPL-3.0-or-later**。
 
-This project is an extended branch based on the core architecture of [kvarenzn/ssm](https://github.com/kvarenzn/ssm).
-~~Given that the original author has stopped development (I think?)~~ , once again express my gratitude to kvarenzn for the excellent work. I’ve basically just wrapped a simple GUI shell  around the original core architecture to make the gameplay experience even more convenient and user-friendly.
+本仓库只做加法和修复,不改变上游的使用方式;所有新增功能围绕一件事:**让"识别当前歌曲 → 载入 → 开打"这条链路更省事**。
 
-**If you're looking for an easier way to play, give this version a try!**
+## 相对上游的改动
 
-**Support for BanG Dream and Project Sekai: Colorful Stage**
+### 🎯 识别歌曲按钮
+- 一键截取当前游戏画面,OCR 识别选歌/编队界面上的歌曲标题,自动匹配曲库并**回填歌曲 ID**(歌名条与可用难度直接出现,无需手动输入);
+- 引擎为 go-ocr + PP-OCR(mobile)模型,模型文件放在可执行文件旁的 `paddle_weights/`(det.onnx / rec.onnx / keys.txt / onnxruntime.dll);
+- 无 scrcpy 会话时自动走 `adb screencap` 兜底(HID 后端也能用);adb 冷启动自动轮询等待,不再误报"无设备";
+- 多人房场景友好:已载入待开始状态下点识别,会自动释放旧加载(日志有提示),识别后重新「载入并准备」即可换歌。
 
+### 🛠 识别调试面板
+- 拖动 X/Y/W/H 滑条,**红框实时跟随**;松手后自动刷新该区域的裁剪图、OCR 原文与匹配结果;
+- 「保存 ROI」一键写入配置(按游戏模式 bang/pjsk 分别记忆);
+- 裁剪区域接近纯色时会提示检查设备是否亮屏解锁、是否停留在游戏界面。
 
+### 🔴 Kill ADB 按钮
+- 接通了上游预留但未接线的 `killAdbServer`:使用 HID 前一键关闭 adb server,避免 USB 接口占用导致 "HID device not found"。
 
-##  What's new
+### 其他
+- 曲库列表本地缓存优先、后台静默刷新,打开即秒出(断网不影响);
+- 修复并发识别互相杀死 adb server、adb 冷启动设备枚举竞态等问题;
+- 界面文案:简中 / 繁中 / 日 / 英。
 
-### 🎵 Smart Song Search
-![Keyword Search](/imgs/retrival.png "retrival")
-- Real-time search across the full Bestdori library
-- One-click difficulty selection (EASY → SPECIAL)
-- Still supports manual Song ID and custom `.txt` chart paths for the power users
+## 构建(Windows)
 
-### ▶️ Playback Control Panel
-![Control Panel](/imgs/paly_page.png "Control Panel")
-- **Now Playing card** — jacket art, song title, band, difficulty, all in one glance
-- **Restart instantly** — hit Restart to re-arm the current song; press Start again without re-loading anything
-- **Offset adjustment** — fine-tune timing on the fly with keyboard shortcuts
+```bat
+:: 1. 前端(Vite + Tailwind,需 Node 18+)
+cd guirontend
+npm install
+npm run build
 
+:: 2. 后端(需 MSYS2 mingw64:ffmpeg、libusb、pkgconf、gcc;详见 .github/workflows/release.yml)
+cd ../..
+set CGO_ENABLED=1
+set PKG_CONFIG_PATH=C:\msys64\mingw64\lib\pkgconfig
+set PATH=C:\msys64\mingw64in;%PATH%
+go build -ldflags "-X main.SSM_VERSION=fork" -o ssm-gui.exe
+```
 
+生成的 `ssm-gui.exe` 需要 `gui/frontend/dist` 已构建(go:embed),以及运行目录旁的 FFmpeg / libusb 运行库 DLL。
 
+## 使用概要
 
+1. 平板/手机开启 USB 调试并连接(或使用支持 AOA 的 HID 模式);
+2. Settings 添加设备序列号与分辨率(短边为宽);
+3. 首次使用先在歌曲识别调试面板中,把红框校准到编队界面的标题位置并保存;
+4. 之后流程:编队界面 → 🎯 识别歌曲 → 选难度 → ▶ 载入并准备 → 演出开始时点 START。
 
-## Quick Start
+详细的游戏素材解包、配置说明请参考[上游仓库文档](https://github.com/hj6hki123/ssm-gui)。
 
-### English
+## 已知限制
 
-1. **Download**
-    - Get the latest package from [Releases](https://github.com/hj6hki123/ssm-gui/releases) and extract it.
-    - If you already have the original `ssm` project, you can place `ssm-gui.exe` in the same folder.
+- 识别使用 adb,因此 HID 会话激活期间需要先释放(流程已自动化);多分辨率下 ROI 需按设备分别校准;
+- PJSK 曲库数据来源为 Sekai-World 的 GitHub 在线文件,离线时如无本地缓存不可用;
+- 项目用途为学习研究,使用可能违反游戏服务条款,风险自负。
 
-2. **Start the program**
-    - Double-click `ssm-gui.exe`, or run:
-      ```bash
-      ./ssm-gui.exe
-      ```
-    - The UI should open automatically at `http://127.0.0.1:8765`.
-    - If it does not open, visit the address manually in your browser.
+## 致谢与许可
 
-3. **Prepare your phone**
-    - Connect your phone to your PC with a USB cable.
-    - Enable **USB debugging / ADB debugging** on the phone.
-
-4. **Copy game resources to PC**
-    - Copy and extract the game resource pack to your computer.
-    - Also copy the device data directory:
-      - BanG Dream example:
-         ```bash
-         adb pull /sdcard/Android/data/jp.co.craftegg.band/files/data/
-         ```
-      - Path format:
-         `/sdcard/Android/data/{game_package_name}/files/data/`
-
-5. **Extract assets**
-    - Open the **Extract Assets** page in the sidebar.
-    - Enter the full path to the data folder you just pulled, then click **Extract**.
-    - This unpacks the charts into an `assets/` folder. Skipping this step causes "Musicscore not found".
-    - Redo this whenever you add new songs or difficulties.
-
-6. **Set up device in GUI**
-    - Open the **Settings** page.
-    - Add your device (serial number can be auto-detected or selected from dropdown).
-    - Choose connection type: **HID** or **ADB**.
-
-7. **Load song and start playback**
-    - In the main flow, go through: **Song Setup -> Play Control -> Start**.
-    - When the first note reaches the judgement line, press **Start** (or keyboard **Enter** / **Space**).
-    - If timing is early/late, adjust **Offset/Delay** and retry.
-
-> Legacy command-line usage is still supported. You can append original CLI parameters as before.
-> See [kvarenzn's Usage Guide](https://github.com/kvarenzn/ssm/blob/main/docs/USAGE.md).
-
-
-1. **下载与解压**
-
-   * 从 [Releases](https://github.com/hj6hki123/ssm-gui/releases) 下载最新版本并解压。
-   * 如果你已经有原版 `ssm` 项目，直接把 `ssm-gui.exe` 放到同一文件夹即可。
-
-2. **启动程序**
-
-   * 直接双击 `ssm-gui.exe`，或用终端运行：
-
-     ```bash
-     ./ssm-gui.exe
-     ```
-   * 程序会尝试自动打开浏览器到 `http://127.0.0.1:8765`。
-   * 如果没有自动打开，请手动输入网址。
-
-3. **连接并准备手机或模拟器**
-
-   * 手机请用 USB 线连接电脑；如果使用模拟器，请先确认 ADB 已启用。
-   * 在手机上开启 **USB 调试 / ADB 调试**。
-   * 可使用以下命令确认设备是否已连接：
-
-     ```bash
-     adb devices
-     ```
-
-4. **准备游戏资源**
-
-   * 将游戏资源包复制到电脑并解压。
-   * 同时把手机中的数据目录复制到电脑：
-
-     * BanG Dream 示例：
-
-       ```bash
-       adb pull /sdcard/Android/data/jp.co.craftegg.band/files/data/
-       ```
-     * 通用路径：
-       `/sdcard/Android/data/{游戏包名}/files/data/`
-
-5. **解包资源**
-
-   * 打开侧边栏的 **Extract Assets** 页面。
-   * 填入刚刚 pull 下来的数据目录的完整路径，点击 **Extract**。
-   * 这会把谱面解包到 `assets/` 文件夹。跳过这步会出现「未找到谱面 / Musicscore not found」。
-   * 每次新增歌曲或难度后都要重新解包。
-
-6. **在 GUI 中设置设备**
-
-   * 进入 **Settings** 页面添加设备。
-   * 序列号可以自动检测，或从下拉菜单选择。
-   * 连接方式选择 **HID** 或 **ADB**。
-
-7. **选歌并开始**
-
-   * 按流程操作：**Song Setup -> Play Control -> Start**。
-   * 当第一个音符接近判定线时，按 **Start**（或键盘 **Enter** / **Space**）。
-   * 如果时机偏早或偏晚，可以调整 **Offset/Delay** 后重试。
-
-> 仍可使用传统命令行参数方式启动。
-> 详细参数请参考 [kvarenzn 的使用指南](https://github.com/kvarenzn/ssm/blob/main/docs/USAGE.md)。
-
-## Alternative Solutions
-
-If you are currently looking for a reliable auto-play/auto-click solution, I highly recommend checking out [juluobaka's ssm_GUI_plus](https://github.com/juluobaka/ssm_GUI_plus). Their project offers a much more stable screen mirroring implementation along with a visually calibrated auto-hit feature. 
-
-I will also be integrating their core methods into the fully automated workflow of the MAA branch in the near future to further enhance overall stability.
-
-## Disclaimer
-This program was heavily developed with the assistance of AI. Please use it at your own discretion and feel free to report any unexpected bugs or issues.
-
-> [!IMPORTANT]
-> **This project is developed for personal learning and research purposes only. The stability and applicability of its functions are not guaranteed.**
->
-> * **Non-Affiliation**: This project is an independent third-party tool and is **not** affiliated with, authorized by, or associated with any game developers, publishers, or related organizations.
-> * **Risk of Use**: Use of this project may violate the service terms of the games or platforms involved, potentially leading to account suspension, bans, or data corruption.
-> * **Limitation of Liability**: The author assumes no responsibility for any consequences resulting from the use of this project. Users are advised to evaluate the risks and use the software with caution.
-
-## Future Projects
-1. Mobile Porting & Deployment: Porting the application to mobile devices for use on non-rooted hardware (leveraging ADB tools such as Shizuku).
-
-2. Automated Rhythm Game Playback: Implementation of image recognition for automated gameplay in rhythm games.
-
----
-
-## 📜 License & Credits
-
-* **Core Play Logic & Chart Parsing**: Credited to the original author [kvarenzn](https://github.com/kvarenzn/ssm).
-* **Web GUI Implementation**: Custom integrated control panel developed specifically for this branch.
-* This project is licensed under the **GPL-3.0-or-later** license.
+- 上游核心与架构:[kvarenzn/ssm](https://github.com/kvarenzn/ssm)、[hj6hki123/ssm-gui](https://github.com/hj6hki123/ssm-gui)
+- 视觉方案参考:[juluobaka/ssm_GUI_plus](https://github.com/juluobaka/ssm_GUI_plus)、[hj6hki123/MaestroMiner](https://github.com/hj6hki123/MaestroMiner)
+- OCR:[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) 模型 + [getcharzp/go-ocr](https://github.com/getcharzp/go-ocr) + [onnxruntime](https://github.com/microsoft/onnxruntime)
+- 本仓库与上游一样以 **GPL-3.0-or-later** 提供,修改版同样开源。
