@@ -342,12 +342,12 @@ func (s *Server) handleSongDB(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if mode == "bang" {
-		songs, err := fetchOrLoad("./all.5.json", "https://bestdori.com/api/songs/all.5.json")
+		songs, err := loadLocalFirst("./all.5.json", "https://bestdori.com/api/songs/all.5.json")
 		if err != nil {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
 			return
 		}
-		bands, err := fetchOrLoad("./all.1.json", "https://bestdori.com/api/bands/all.1.json")
+		bands, err := loadLocalFirst("./all.1.json", "https://bestdori.com/api/bands/all.1.json")
 		if err != nil {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
 			return
@@ -358,17 +358,17 @@ func (s *Server) handleSongDB(w http.ResponseWriter, r *http.Request) {
 		const sekaiMusicDifficultiesURL = "https://raw.githubusercontent.com/Sekai-World/sekai-master-db-diff/main/musicDifficulties.json"
 		const sekaiMusicArtistsURL = "https://raw.githubusercontent.com/Sekai-World/sekai-master-db-diff/main/musicArtists.json"
 
-		songs, err := fetchOrLoad("./sekai_master_db_diff_musics.json", sekaiMusicsURL)
+		songs, err := loadLocalFirst("./sekai_master_db_diff_musics.json", sekaiMusicsURL)
 		if err != nil {
 			http.Error(w, `{"error":"songs EN fetch failed: `+err.Error()+`"}`, http.StatusBadGateway)
 			return
 		}
-		difficulties, err := fetchOrLoad("./sekai_master_db_diff_music_difficulties.json", sekaiMusicDifficultiesURL)
+		difficulties, err := loadLocalFirst("./sekai_master_db_diff_music_difficulties.json", sekaiMusicDifficultiesURL)
 		if err != nil {
 			http.Error(w, `{"error":"difficulties fetch failed: `+err.Error()+`"}`, http.StatusBadGateway)
 			return
 		}
-		artists, err := fetchOrLoad("./sekai_master_db_diff_music_artists.json", sekaiMusicArtistsURL)
+		artists, err := loadLocalFirst("./sekai_master_db_diff_music_artists.json", sekaiMusicArtistsURL)
 		if err != nil {
 			http.Error(w, `{"error":"artists fetch failed: `+err.Error()+`"}`, http.StatusBadGateway)
 			return
@@ -673,6 +673,7 @@ func (s *Server) Start() (string, error) {
 	mux.HandleFunc("/api/songdb", s.handleSongDB)
 	mux.HandleFunc("/api/kill-adb", s.handleKillAdb)
 	mux.HandleFunc("/api/detect-adb", s.handleDetectAdb)
+	mux.HandleFunc("/api/detect-song", s.handleDetectSong)
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {

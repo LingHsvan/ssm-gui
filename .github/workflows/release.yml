@@ -288,35 +288,11 @@ jobs:
             zip -r "${dir%/}.zip" "$dir"
           done
 
-      - name: Generate changelog
-        shell: bash
-        run: |
-          # Prefer the hand-written, user-facing section from CHANGELOG.md.
-          notes=$(awk -v tag="## [$VERSION]" 'index($0, tag) == 1 {f=1; next} f && /^## / {exit} f {print}' CHANGELOG.md 2>/dev/null || true)
-          if [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
-            printf '%s\n' "$notes" > RELEASE_NOTES.md
-          else
-            # Fallback: build a list from the commit log since the previous tag.
-            prev=$(git describe --tags --abbrev=0 "v$VERSION^" 2>/dev/null || true)
-            {
-              echo "## Changes"
-              echo
-              if [ -n "$prev" ]; then
-                git log --no-merges --pretty='- %s' "$prev..v$VERSION"
-                echo
-                echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$prev...v$VERSION"
-              else
-                git log --no-merges --pretty='- %s' "v$VERSION"
-              fi
-            } > RELEASE_NOTES.md
-          fi
-          cat RELEASE_NOTES.md
-
       - name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "v$VERSION" \
             --title "v$VERSION" \
-            --notes-file RELEASE_NOTES.md \
+            --generate-notes \
             builds/*.zip

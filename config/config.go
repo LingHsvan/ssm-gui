@@ -22,6 +22,10 @@ type Config struct {
 	Path    string                   `json:"-"`
 	Devices map[string]*DeviceConfig `json:"devices"`
 
+	// SongDetectROI persists calibrated normalized [x,y,w,h] crops for the
+	// /api/detect-song endpoint, keyed by game mode ("bang"/"pjsk").
+	SongDetectROI map[string][4]float64 `json:"songDetectROI,omitempty"`
+
 	// mu guards Devices and the on-disk file. The GUI mutates the device
 	// map from HTTP handler goroutines while playback may read it, so all
 	// access goes through the locked methods below.

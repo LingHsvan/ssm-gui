@@ -4,8 +4,6 @@
 > **For new feature development, please head over to the [test/automation](https://github.com/hj6hki123/ssm-gui/tree/test/automation) branch.**
 > 
 > **This branch is under active development, focusing on a fully autonomous 'unattended mode' to achieve a completely hands-off user experience.**
-> 
-> **Or check out [MaestroMiner](https://github.com/hj6hki123/MaestroMiner) — a further evolution that integrates the [MAA framework](https://github.com/MaaXYZ/MaaFramework) to drive the entire pre-game flow (navigation, song select, start) fully automatically.**
 <p align="center">
     <a href="https://github.com/hj6hki123/ssm-gui">
         <img src="imgs/page.png" alt="ssm-gui-banner"/>

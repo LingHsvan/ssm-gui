@@ -300,6 +300,8 @@ function setBackend(b) {
         warnBox.classList.add('hidden');
       }
     }
+    const killBtn = document.getElementById('kill-adb-btn');
+    if (killBtn) killBtn.classList.toggle('hidden', b !== 'hid');
 
   document.getElementById('orient-wrap').style.opacity = b === 'adb' ? '0.4' : '1';
 }
@@ -940,6 +942,102 @@ function deleteDevice(serial) {
     .then(function (r) { if (r.ok) loadDevices(); });
 }
 
+// ══ Song detect debug panel ═══════════════════════════════
+let detRefreshTimer = null;
+
+function detUpdateOverlay() {
+  const roi = detRoiFromSliders();
+  const box = document.getElementById('det-box');
+  if (!box) return;
+  box.style.left = (roi[0] * 100) + '%';
+  box.style.top = (roi[1] * 100) + '%';
+  box.style.width = (roi[2] * 100) + '%';
+  box.style.height = (roi[3] * 100) + '%';
+}
+
+// The red box is a client-side overlay, so dragging updates it instantly;
+// OCR/crop refresh is debounced until the drag settles.
+function scheduleDetectRefresh() {
+  if (detRefreshTimer) clearTimeout(detRefreshTimer);
+  detRefreshTimer = setTimeout(function () { detectPreview(); }, 500);
+}
+
+function detRoiFromSliders() {
+  return ['x', 'y', 'w', 'h'].map(function (k) {
+    return parseFloat(document.getElementById('det-' + k).value) || 0;
+  });
+}
+
+function detSetSliders(roi) {
+  ['x', 'y', 'w', 'h'].forEach(function (k, i) {
+    const s = document.getElementById('det-' + k);
+    if (s) s.value = roi[i];
+    const v = document.getElementById('det-' + k + 'v');
+    if (v) v.textContent = Math.round((roi[i] || 0) * 100) + '%';
+  });
+  detUpdateOverlay();
+}
+
+function detSlider() {
+  ['x', 'y', 'w', 'h'].forEach(function (k) {
+    const s = document.getElementById('det-' + k);
+    const v = document.getElementById('det-' + k + 'v');
+    if (s && v) v.textContent = Math.round(parseFloat(s.value || 0) * 100) + '%';
+  });
+  detUpdateOverlay();
+  scheduleDetectRefresh();
+}
+
+function detectDebugToggle() {
+  const p = document.getElementById('det-debug');
+  if (!p) return;
+  p.classList.toggle('hidden');
+  if (!p.classList.contains('hidden')) {
+    // Always sync sliders from the server-saved ROI on open: range inputs
+    // default to their midpoint (not empty), so a value check never fired
+    // and the box used to land wherever the midpoints put it.
+    detectPreview(false, true);
+  }
+}
+
+let detBusy = false, detPending = false, detPendingSave = false;
+
+function detectPreview(saveAfter, useServerRoi) {
+  // Gameplay-safety: skip (and drop pending replays) only while a song is
+  // actually playing; the armed state releases on detect by design.
+  if (S.state === 2) { detPending = false; detPendingSave = false; return; }
+  if (detBusy) { detPending = true; detPendingSave = detPendingSave || !!saveAfter; return; }
+  detBusy = true;
+  const roiAtRequest = detRoiFromSliders().join(',');
+  let url = '/api/detect-song?debug=1&render=plain&mode=' + (S.mode || 'bang');
+  if (!useServerRoi) url += '&roi=' + roiAtRequest;
+  if (saveAfter) url += '&save=1';
+  fetch(url)
+    .then(function (r) { return r.text().then(function (tx) { try { return JSON.parse(tx); } catch (e) { return { error: tx || ('HTTP ' + r.status) }; } }); })
+    .then(function (d) {
+      if (d.error) { log('song-log', t('log.detect.fail') + d.error, 'err'); return; }
+      // Re-sync sliders only when the user has not moved them since the
+      // request started — otherwise the stale echo would snap them back.
+      if (d.roi && (useServerRoi || detRoiFromSliders().join(',') === roiAtRequest)) {
+        detSetSliders(d.roi);
+      }
+      const f = document.getElementById('det-frame'), c = document.getElementById('det-crop');
+      if (d.frameJpeg) { f.src = 'data:image/jpeg;base64,' + d.frameJpeg; }
+      if (d.cropPng) { c.src = 'data:image/png;base64,' + d.cropPng; }
+      document.getElementById('det-info').textContent =
+        (d.matched ? '✓ #' + d.songId + ' ' + d.title + ' (' + d.score + ')' : '✗') +
+        '  [' + (d.texts || []).join(' | ') + ']';
+      if (saveAfter) log('song-log', t('log.detect.roisaved'), 'ok');
+    })
+    .catch(function (e) { log('song-log', t('log.detect.fail') + e, 'err'); })
+    .then(function () {
+      detBusy = false;
+      if (detPending) { detPending = false; const s = detPendingSave; detPendingSave = false; detectPreview(s); }
+    });
+}
+
+function detectSaveROI() { detectPreview(true); }
+
 // ══ ADB & Device Utilities ════════════════════════════════
 function killAdbServer() {
   log('song-log', t('log.adb.killing'), 'info');
@@ -949,6 +1047,44 @@ function killAdbServer() {
       else log('song-log', t('log.adb.kill.fail'), 'err');
     })
     .catch(function (e) { log('song-log', t('log.conn.fail') + e, 'err'); });
+}
+
+function detectSong() {
+  // Never touch adb/libusb mid-song; the Ready (armed/matchmaking) state is
+  // allowed — detection releases the stale arm and the user re-Loads.
+  if (S.state === 2) { log('song-log', t('log.detect.busy'), 'err'); return; }
+  const btn = document.getElementById('detect-song-btn');
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; btn.textContent = t('song.detect.running'); }
+  fetch('/api/detect-song?debug=1&mode=' + (S.mode || 'bang'))
+    .then(function (r) { return r.text().then(function (tx) { return { ok: r.ok, status: r.status, tx: tx }; }); })
+    .then(function (res) {
+      let d = null;
+      try { d = JSON.parse(res.tx); } catch (e) {}
+      if (!res.ok || !d || d.error) {
+        const msg = d && d.error ? d.error : (res.tx || ('HTTP ' + res.status));
+        log('song-log', t('log.detect.fail') + msg, 'err');
+        return;
+      }
+      const tm = d.timings || {};
+      const tmsg = 'OCR ' + Math.round(tm.ocrMs || 0) + 'ms / ' + Math.round(tm.totalMs || 0) + 'ms';
+      if (d.hidReleased) log('song-log', t('log.detect.hidclose'), 'info');
+      if (d.blank) log('song-log', t('log.detect.blank'), 'err');
+      if (d.matched && d.songId > 0) {
+        log('song-log', t('log.detect.ok') + ' #' + d.songId + ' ' + d.title + ' (' + d.score + ', ' + tmsg + ')', 'ok');
+        const idInput = document.getElementById('song-id');
+        if (idInput) idInput.value = d.songId;
+        // The delegated input listener sits on document and synthetic events
+        // do not bubble to it by default — invoke the handler directly. The
+        // song DB is lazy-loaded, so make sure it is ready first, otherwise
+        // onManualId cannot resolve the title/difficulties.
+        loadDB(function () { onManualId(); });
+      } else {
+        log('song-log', t('log.detect.nomatch') + '[' + (d.texts || []).join(' / ') + '] (' + tmsg + ')', 'err');
+      }
+    })
+    .catch(function (e) { log('song-log', t('log.detect.fail') + e, 'err'); })
+    .finally(function () { if (btn) { btn.disabled = false; btn.style.opacity = ''; btn.innerHTML = orig; } });
 }
 
 function autoDetectDevice() {
@@ -1023,6 +1159,9 @@ setBackend(S.backend);
 updateDiffLabels();
 resetAdvanced();
 loadDevices();
+// Warm the song DB at startup so song search and Detect Song have titles
+// available immediately (backend serves it from local cache).
+loadDB(function () {});
 
 // ══ event delegation ═══════════════════════════════════════
 // One set of delegated listeners replaces the old inline on* attributes and
@@ -1030,7 +1169,8 @@ loadDevices();
 // data-onkeydown / data-onfocus, with an optional data-arg payload. Handlers
 // receive (arg, element, event).
 const ACTIONS = {
-  toggleLangMenu, toggleTheme, navToSearch, killAdbServer, autoDetectDevice,
+  toggleLangMenu, toggleTheme, navToSearch, killAdbServer, autoDetectDevice, detectSong,
+  detectDebugToggle, detSlider, detectPreview, detectSaveROI,
   clearSong, clearQ, submitRun, apiStart, apiRestart, resetOff, resetAdvanced,
   doExtract, saveDevice, onQInput, onQFocus, onManualId, onGreatCountInput,
   nav: function (arg) { nav(arg); },
