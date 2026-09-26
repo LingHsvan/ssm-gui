@@ -31,8 +31,8 @@ it will be here; keep upstream's version and re-apply the hook.
 | `scores/common.go` | `beforeEmit` field at the end of `VTEGenerateConfig` |
 | `controllers/scrcpy.go` | `frames` field, `setupDecoder()` call, skip video payload when not decoding, `KillReverseForward`, non-fatal server start, low video bitrate, 500 ms settle delay |
 
-Other small differences are plain bug fixes (`adb/client.go`,
-`decoders/av/av.go`) worth offering upstream.
+The only other differences are small fixes kept in this fork
+(`adb/client.go`, `decoders/av/av.go`).
 
 ## Merging
 

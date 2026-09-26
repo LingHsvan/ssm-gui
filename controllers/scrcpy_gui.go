@@ -53,9 +53,10 @@ func (g GUIScrcpy) Close() error {
 		keep(c.controlSocket.Close())
 	}
 
+	// Drop is idempotent and makes later Decode calls no-ops. The pointer is
+	// kept: the video reader goroutine may still be about to use it.
 	if c.decoder != nil {
 		c.decoder.Drop()
-		c.decoder = nil
 	}
 
 	if c.listener != nil {

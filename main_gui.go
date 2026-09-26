@@ -72,33 +72,42 @@ func runGUI() {
 	srv := gui.NewServer(guiPort, conf)
 
 	// Ensure only one playback goroutine runs at a time.
+	type playback struct {
+		cancel context.CancelFunc
+		done   chan struct{}
+	}
 	var (
-		runMu         sync.Mutex
-		currentCancel context.CancelFunc
-		doneCh        chan struct{}
+		runMu   sync.Mutex
+		current *playback
 	)
 
 	runOnce := func(req gui.RunRequest) {
-		// Cancel the previous run and wait for it to finish (including scrcpy.Close).
+		// Cancel the previous run and wait for it to finish (including
+		// scrcpy.Close). Requests can arrive concurrently (Load, Restart and
+		// the automatic re-prepare), so re-check after waiting: if another
+		// request started a run meanwhile, cancel that one too. The last
+		// request wins and runs never overlap.
 		runMu.Lock()
-		if currentCancel != nil {
-			currentCancel()
-			old := doneCh
+		for current != nil {
+			prev := current
+			prev.cancel()
 			runMu.Unlock()
-			<-old
+			<-prev.done
 			runMu.Lock()
+			if current == prev {
+				current = nil
+			}
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
-		currentCancel = cancel
-		thisDone := make(chan struct{})
-		doneCh = thisDone
+		this := &playback{cancel: cancel, done: make(chan struct{})}
+		current = this
 		runMu.Unlock()
 
 		go func() {
 			defer func() {
 				cancel()
-				close(thisDone)
+				close(this.done)
 			}()
 			// log.Fatal/Die panic with log.FatalErr; report it in the UI
 			// instead of taking the whole GUI down.
