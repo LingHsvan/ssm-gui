@@ -260,10 +260,12 @@ func downloadServer() {
 		log.Die("`scrcpy-server` is required.")
 	}
 	log.Infoln("Downloading... Please wait.")
-	res, err := http.Get(SERVER_FILE_DOWNLOAD_URL)
+	client := &http.Client{Timeout: 60 * time.Second}
+	res, err := client.Get(SERVER_FILE_DOWNLOAD_URL)
 	if err != nil {
 		log.Dieln("Failed to download `scrcpy-server`.", fmt.Sprintf("Error: %s", err))
 	}
+	defer res.Body.Close()
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
 		log.Dieln("Failed to download.", fmt.Sprintf("Error: %s", err))
@@ -766,6 +768,17 @@ func main() {
 	if len(os.Args) == 1 {
 		guiMode = true
 	}
+	// log.Fatal/Die panic with log.FatalErr so deferred cleanup still runs.
+	// Registered before term.Bye so the terminal is restored before exiting.
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(log.FatalErr); ok {
+				os.Exit(1)
+			}
+			panic(r)
+		}
+	}()
+
 	term.Hello()
 	defer term.Bye()
 

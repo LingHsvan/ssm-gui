@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kvarenzn/ssm/adb"
@@ -34,8 +35,8 @@ type ScrcpyController struct {
 	height   int
 	codecID  string
 	decoder  *av.AVDecoder
-	cRunning bool
-	vRunning bool
+	cRunning atomic.Bool
+	vRunning atomic.Bool
 
 	frameMu     sync.RWMutex
 	latestFrame *ScrcpyFrame
@@ -199,13 +200,13 @@ func (c *ScrcpyController) Open(filepath string, version string) error {
 	}
 	c.height = int(binary.BigEndian.Uint32(buf))
 
-	c.cRunning = true
-	c.vRunning = true
+	c.cRunning.Store(true)
+	c.vRunning.Store(true)
 
 	go func() {
 		msgTypeBuf := make([]byte, 1)
 		sizeBuf := make([]byte, 4)
-		for c.cRunning {
+		for c.cRunning.Load() {
 			if err := readFull(controlSocket, msgTypeBuf); err != nil {
 				break
 			}
@@ -221,13 +222,13 @@ func (c *ScrcpyController) Open(filepath string, version string) error {
 			}
 		}
 
-		c.cRunning = false
+		c.cRunning.Store(false)
 	}()
 
 	go func() {
 		ptsBuf := make([]byte, 8)
 		sizeBuf := make([]byte, 4)
-		for c.vRunning {
+		for c.vRunning.Load() {
 			if err := readFull(videoSocket, ptsBuf); err != nil {
 				break
 			}
@@ -250,7 +251,7 @@ func (c *ScrcpyController) Open(filepath string, version string) error {
 			}
 			c.decoder.Decode(pts, data)
 		}
-		c.vRunning = false
+		c.vRunning.Store(false)
 	}()
 
 	return nil
@@ -288,8 +289,8 @@ func (c *ScrcpyController) Up(pointerID uint64, x, y int) {
 }
 
 func (c *ScrcpyController) Close() error {
-	c.cRunning = false
-	c.vRunning = false
+	c.cRunning.Store(false)
+	c.vRunning.Store(false)
 
 	// Close every resource even if an earlier one errors, so a failed
 	// videoSocket.Close() can no longer leak the control socket and listener.
