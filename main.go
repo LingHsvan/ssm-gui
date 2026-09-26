@@ -25,7 +25,6 @@ import (
 	"github.com/kvarenzn/ssm/config"
 	"github.com/kvarenzn/ssm/controllers"
 	"github.com/kvarenzn/ssm/db"
-	"github.com/kvarenzn/ssm/gui" // newly added
 	"github.com/kvarenzn/ssm/log"
 	"github.com/kvarenzn/ssm/scores"
 	"github.com/kvarenzn/ssm/stage"
@@ -37,7 +36,7 @@ import (
 
 var SSM_VERSION = "(unknown)"
 
-// original flags
+// flags
 var (
 	backend      string
 	songID       int
@@ -51,196 +50,12 @@ var (
 	pjskMode     bool
 )
 
-var (
-	guiMode bool
-	guiPort int
-)
-
 const (
 	SERVER_FILE_VERSION      = "3.3.1"
 	SERVER_FILE              = "scrcpy-server-v" + SERVER_FILE_VERSION
 	SERVER_FILE_DOWNLOAD_URL = "https://github.com/Genymobile/scrcpy/releases/download/v" + SERVER_FILE_VERSION + "/" + SERVER_FILE
 	SERVER_FILE_SHA256       = "a0f70b20aa4998fbf658c94118cd6c8dab6abbb0647a3bdab344d70bc1ebcbb8"
 )
-
-// ─────────────────────────────────────────────
-// GUI mode main flow
-// ─────────────────────────────────────────────
-func runGUI(conf *config.Config) {
-	srv := gui.NewServer(guiPort, conf)
-
-	// Ensure only one playback goroutine runs at a time.
-	var (
-		runMu         sync.Mutex
-		currentCancel context.CancelFunc
-		doneCh        chan struct{}
-	)
-
-	runOnce := func(req gui.RunRequest) {
-		// Cancel the previous run and wait for it to finish (including scrcpy.Close).
-		runMu.Lock()
-		if currentCancel != nil {
-			currentCancel()
-			old := doneCh
-			runMu.Unlock()
-			<-old
-			runMu.Lock()
-		}
-
-		ctx, cancel := context.WithCancel(context.Background())
-		currentCancel = cancel
-		thisDone := make(chan struct{})
-		doneCh = thisDone
-		runMu.Unlock()
-
-		go func() {
-			defer func() {
-				cancel()
-				close(thisDone)
-			}()
-
-			backend = req.Backend
-			songID = req.SongID
-			difficulty = req.Diff
-			direction = req.Orient
-			chartPath = req.ChartPath
-			deviceSerial = req.DeviceSerial
-			pjskMode = req.Mode == "pjsk"
-
-			var chartText []byte
-			var err error
-			if chartPath == "" {
-				pathResults, globErr := findMusicscorePath(pjskMode, songID, difficulty)
-				if globErr != nil || len(pathResults) < 1 {
-					srv.SetError("Musicscore not found. Please extract assets first or use a custom chart path.")
-					return
-				}
-				chartText, err = os.ReadFile(pathResults[0])
-			} else {
-				chartText, err = os.ReadFile(chartPath)
-			}
-			if err != nil {
-				srv.SetError("Failed to read musicscore: " + err.Error())
-				return
-			}
-
-			var chart scores.Chart
-			if pjskMode {
-				chart, err = scores.ParseSUS(string(chartText))
-				if err != nil {
-					srv.SetError("Failed to parse SUS: " + err.Error())
-					return
-				}
-			} else {
-				chart = scores.ParseBMS(string(chartText))
-			}
-
-			genConfig := newDefaultVTEConfig(pjskMode)
-			genConfig.TimingJitter = req.TimingJitter
-			genConfig.PositionJitter = req.PositionJitter
-			genConfig.TapDurJitter = req.TapDurJitter
-			genConfig.GreatOffsetMs = func() int64 {
-				v := req.GreatOffsetMs
-				if v < 0 {
-					v = -v
-				}
-				if v == 0 {
-					v = 10
-				}
-				return v
-			}()
-			genConfig.GreatTargetCount = func() int64 {
-				v := req.GreatCount
-				if v < 0 {
-					return 0
-				}
-				return v
-			}()
-			// Override defaults with user-supplied advanced params (0 = keep default)
-			if req.TapDuration > 0 {
-				genConfig.TapDuration = req.TapDuration
-			}
-			if req.FlickDuration > 0 {
-				genConfig.FlickDuration = req.FlickDuration
-			}
-			if req.FlickReportInterval > 0 {
-				genConfig.FlickReportInterval = req.FlickReportInterval
-			}
-			if req.SlideReportInterval > 0 {
-				genConfig.SlideReportInterval = req.SlideReportInterval
-			}
-			if req.FlickFactor > 0 {
-				genConfig.FlickFactor = req.FlickFactor
-			}
-			if req.FlickPow > 0 {
-				genConfig.FlickPow = req.FlickPow
-			}
-			rawEvents, greatApplied := scores.GenerateTouchEvent(genConfig, chart)
-			srv.SetGreatStats(req.GreatCount, int64(greatApplied))
-
-			ctrl, events, err := openController(conf, backend, deviceSerial, direction == "right", rawEvents)
-			if err != nil {
-				srv.SetError(err.Error())
-				return
-			}
-			defer ctrl.Close()
-
-			if len(events) == 0 {
-				srv.SetError("No playable events were generated for this chart.")
-				return
-			}
-
-			np := gui.NowPlaying{
-				SongID:    req.SongID,
-				Diff:      req.Diff,
-				Mode:      req.Mode,
-				Title:     req.NowPlaying.Title,
-				Artist:    req.NowPlaying.Artist,
-				DiffLevel: req.NowPlaying.DiffLevel,
-				JacketURL: req.NowPlaying.JacketURL,
-			}
-
-			srv.SetReady(ctrl, events, np)
-
-			if !srv.WaitForStart(ctx) {
-				return
-			}
-
-			start := time.Now().Add(-time.Duration(events[0].Timestamp) * time.Millisecond)
-			srv.Autoplay(ctx, start)
-
-			time.Sleep(300 * time.Millisecond)
-		}()
-	}
-
-	srv.OnRunRequest = func(req gui.RunRequest) {
-		runOnce(req)
-	}
-
-	srv.OnExtractRequest = func(path string) error {
-		_, err := Extract(path, extractAssetFilter)
-		return err
-	}
-
-	addr, err := srv.Start()
-	if err != nil {
-		log.Die("Failed to start GUI server:", err)
-	}
-
-	fmt.Printf("\n  SSM GUI started\n")
-	fmt.Printf("   Open this URL in your browser: %s\n\n", addr)
-
-	openBrowser(addr)
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	fmt.Println("\nSSM GUI closed")
-}
-
-// ─────────────────────────────────────────────
-// The following are original functions (unchanged).
-// ─────────────────────────────────────────────
 
 func downloadServer() {
 	log.Infof("To use adb as the backend, the third-party component `scrcpy-server` (version %s) is required.", SERVER_FILE_VERSION)
@@ -256,27 +71,40 @@ func downloadServer() {
 	if err != nil {
 		log.Die("Failed to get input:", err)
 	}
+
 	if input == "N" || input == "n" {
-		log.Die("`scrcpy-server` is required.")
+		log.Die("`scrcpy-server` is required. To use `adb` as the backend, you should download it manually.")
 	}
+
 	log.Infoln("Downloading... Please wait.")
+
 	client := &http.Client{Timeout: 60 * time.Second}
 	res, err := client.Get(SERVER_FILE_DOWNLOAD_URL)
 	if err != nil {
-		log.Dieln("Failed to download `scrcpy-server`.", fmt.Sprintf("Error: %s", err))
+		log.Dieln("Failed to download `scrcpy-server`.",
+			locale.P.Sprintf("Error: %s", err),
+			"You may try again later, download it manually, or use `hid` backend instead.")
 	}
 	defer res.Body.Close()
+
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Dieln("Failed to download.", fmt.Sprintf("Error: %s", err))
+		log.Dieln("Failed to download `scrcpy-server`.",
+			fmt.Sprintf("Error: %s", err),
+			"You may try again later, download it manually, or use `hid` backend instead.")
 	}
+
 	h := crypto.SHA256.New()
-	h.Write(data)
-	if fmt.Sprintf("%x", h.Sum(nil)) != SERVER_FILE_SHA256 {
-		log.Die("Checksum mismatch.")
+	if _, err := h.Write(data); err != nil {
+		log.Die("Failed to calculate sha256 of `scrcpy-server`:", err)
 	}
+
+	if fmt.Sprintf("%x", h.Sum(nil)) != SERVER_FILE_SHA256 {
+		log.Die("Checksum mismatch. Please try again later.")
+	}
+
 	if err := os.WriteFile(SERVER_FILE, data, 0o644); err != nil {
-		log.Die("Failed to save:", err)
+		log.Die("Failed to save `scrcpy-server` to disk:", err)
 	}
 }
 
@@ -285,22 +113,30 @@ func checkOrDownload() {
 		if !os.IsNotExist(err) {
 			log.Die("Failed to locate server file:", err)
 		}
+
 		downloadServer()
 	} else {
 		data, err := os.ReadFile(SERVER_FILE)
 		if err != nil {
-			log.Die("Failed to read:", err)
+			log.Die("Failed to read the content of `scrcpy-server`:", err)
 		}
+
 		h := crypto.SHA256.New()
-		h.Write(data)
+		if _, err := h.Write(data); err != nil {
+			log.Die("Failed to calculate sha256 of `scrcpy-server`:", err)
+		}
+
 		if fmt.Sprintf("%x", h.Sum(nil)) != SERVER_FILE_SHA256 {
-			log.Warn("Checksum mismatch.")
+			log.Warn("Checksum mismatch. File may be corrupted.")
 			downloadServer()
 		}
 	}
 }
 
-const errNoDevice = "Please connect your Android device to this computer."
+const (
+	errNoDevice = "Please connect your Android device to this computer."
+)
+
 const jacketHeight = 15
 
 type tui struct {
@@ -316,74 +152,110 @@ type tui struct {
 	orignal        image.Image
 	scaled         image.Image
 	graphicsMethod term.GraphicsMethod
+	mu             sync.Mutex
 	renderMutex    *sync.Mutex
 	sigwinch       chan os.Signal
 }
 
 func newTui(database db.MusicDatabase) *tui {
-	return &tui{db: database, renderMutex: &sync.Mutex{}, sigwinch: make(chan os.Signal, 1)}
+	return &tui{
+		db:          database,
+		renderMutex: &sync.Mutex{},
+		sigwinch:    make(chan os.Signal, 1),
+	}
 }
 
 func (t *tui) init(controller controllers.Controller, events []common.ViscousEventItem) error {
 	if err := term.PrepareTerminal(); err != nil {
 		return err
 	}
-	log.SetBeforeDie(func() { t.deinit() })
+
+	log.SetBeforeDie(func() {
+		t.deinit()
+	})
+
 	if err := t.onResize(); err != nil {
 		return err
 	}
+
 	t.controller = controller
 	t.events = events
+
 	t.startListenResize()
+
 	term.SetWindowTitle(locale.P.Sprintf("ssm: READY"))
+
 	return nil
 }
 
 func (t *tui) loadJacket() error {
 	var err error
-	if t.size == nil {
-		t.size, err = term.GetTerminalSize()
-		if err != nil {
-			return err
-		}
+	var sz *term.TermSize
+	sz, err = term.GetTerminalSize()
+	if err != nil {
+		return err
 	}
+
+	t.mu.Lock()
+	if t.size == nil {
+		t.size = sz
+	}
+	t.mu.Unlock()
+
 	if chartPath != "" {
 		return fmt.Errorf("No song ID provided")
 	}
+
 	thumb, jacket := t.db.Jacket(songID)
 	if thumb == "" {
 		return fmt.Errorf("Jacket not found")
 	}
-	t.graphicsMethod = term.GetGraphicsMethod()
+
+	gm := term.GetGraphicsMethod()
+
 	var path string
-	switch t.graphicsMethod {
+	switch gm {
 	case term.HALF_BLOCK, term.OVERSTRIKED_DOTS:
 		path = thumb
 	case term.SIXEL_PROTOCOL, term.ITERM2_GRAPHICS_PROTOCOL, term.KITTY_GRAPHICS_PROTOCOL:
 		path = jacket
 	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	t.orignal, err = term.DecodeImage(data)
+
+	orignal, err := term.DecodeImage(data)
 	if err != nil {
 		return err
 	}
+
 	var length int
-	switch t.graphicsMethod {
+	t.mu.Lock()
+	t.graphicsMethod = gm
+	t.orignal = orignal
+	switch gm {
 	case term.HALF_BLOCK:
 		length = jacketHeight * 2
 	case term.OVERSTRIKED_DOTS:
 		length = jacketHeight * 4
-	case term.SIXEL_PROTOCOL, term.KITTY_GRAPHICS_PROTOCOL:
+	case term.SIXEL_PROTOCOL:
+		fallthrough
+	case term.KITTY_GRAPHICS_PROTOCOL:
 		length = t.size.CellHeight * jacketHeight
 	}
+	t.mu.Unlock()
+
+	var scaled image.Image
 	if length > 0 {
-		scaled := image.NewNRGBA(image.Rect(0, 0, length, length))
-		draw.BiLinear.Scale(scaled, scaled.Rect, t.orignal, t.orignal.Bounds(), draw.Src, nil)
-		t.scaled = scaled
+		scaled = image.NewNRGBA(image.Rect(0, 0, length, length))
+		draw.BiLinear.Scale(scaled.(*image.NRGBA), scaled.Bounds(), orignal, orignal.Bounds(), draw.Src, nil)
 	}
+
+	t.mu.Lock()
+	t.scaled = scaled
+	t.mu.Unlock()
 	return nil
 }
 
@@ -401,45 +273,74 @@ func (t *tui) onResize() error {
 	if err != nil {
 		return err
 	}
-	if t.orignal == nil && !t.loadFailed {
+
+	t.mu.Lock()
+	needsJacket := t.orignal == nil
+	t.mu.Unlock()
+
+	if needsJacket && !t.loadFailed {
 		if err := t.loadJacket(); err != nil {
+			log.Debugf("Failed to load music jacket: %s", err)
 			t.loadFailed = true
 		}
 	}
-	if t.orignal != nil {
+
+	t.mu.Lock()
+	orignal := t.orignal
+	gm := t.graphicsMethod
+	oldSize := t.size
+	oldScaled := t.scaled
+	t.mu.Unlock()
+
+	if orignal != nil {
 		var length int
-		switch t.graphicsMethod {
+		switch gm {
 		case term.HALF_BLOCK:
-			if t.scaled != nil {
+			if oldScaled != nil {
 				length = jacketHeight * 2
 			}
 		case term.OVERSTRIKED_DOTS:
-			if t.scaled != nil {
+			if oldScaled != nil {
 				length = jacketHeight * 4
 			}
-		case term.SIXEL_PROTOCOL, term.KITTY_GRAPHICS_PROTOCOL:
-			if t.scaled == nil || t.size == nil || newSize.CellHeight != t.size.CellHeight {
+		case term.SIXEL_PROTOCOL:
+			fallthrough
+		case term.KITTY_GRAPHICS_PROTOCOL:
+			if oldScaled == nil || oldSize == nil || newSize.CellHeight != oldSize.CellHeight {
 				length = newSize.CellHeight * jacketHeight
 			}
 		}
+
 		if length > 0 {
 			s := image.NewNRGBA(image.Rect(0, 0, length, length))
-			draw.BiLinear.Scale(s, s.Rect, t.orignal, t.orignal.Bounds(), draw.Src, nil)
+			draw.BiLinear.Scale(s, s.Rect, orignal, orignal.Bounds(), draw.Src, nil)
+			t.mu.Lock()
 			t.scaled = s
+			t.mu.Unlock()
 		}
 	}
+
+	t.mu.Lock()
 	t.size = newSize
+	t.mu.Unlock()
+
 	term.ClearScreen()
+
 	t.render(true)
 	return nil
 }
 
 func (t *tui) pcenterln(s string) {
-	if t.size == nil {
+	t.mu.Lock()
+	sz := t.size
+	t.mu.Unlock()
+
+	if sz == nil {
 		return
 	}
+
 	term.MoveHome()
-	cols := t.size.Col
+	cols := sz.Col
 	width := term.WidthOf(s)
 	fmt.Print(strings.Repeat(" ", max((cols-width)/2, 0)))
 	fmt.Print(s)
@@ -480,64 +381,87 @@ func (t *tui) emptyLine() {
 }
 
 func (t *tui) render(full bool) {
-	if t.size == nil {
+	t.mu.Lock()
+	sz := t.size
+	playing := t.playing
+	off := t.offset
+	scaled := t.scaled
+	orignal := t.orignal
+	gm := t.graphicsMethod
+	t.mu.Unlock()
+
+	if sz == nil {
 		return
 	}
+
 	if ok := t.renderMutex.TryLock(); !ok {
 		return
 	}
+
 	term.ResetCursor()
 	t.emptyLine()
-	if full && (t.scaled != nil || t.graphicsMethod == term.ITERM2_GRAPHICS_PROTOCOL && t.orignal != nil) {
-		switch t.graphicsMethod {
+
+	if full && (scaled != nil || gm == term.ITERM2_GRAPHICS_PROTOCOL && orignal != nil) {
+		switch gm {
 		case term.HALF_BLOCK:
-			term.DisplayImageUsingHalfBlock(t.scaled, false, (t.size.Col-jacketHeight*2)/2)
+			term.DisplayImageUsingHalfBlock(scaled, false, (sz.Col-jacketHeight*2)/2)
 		case term.OVERSTRIKED_DOTS:
-			term.DisplayImageUsingOverstrikedDots(t.scaled, 0, 0, (t.size.Col-jacketHeight*2)/2)
+			term.DisplayImageUsingOverstrikedDots(scaled, 0, 0, (sz.Col-jacketHeight*2)/2)
 		case term.SIXEL_PROTOCOL:
-			term.DisplayImageUsingSixelProtocol(t.scaled, t.size, jacketHeight)
+			term.DisplayImageUsingSixelProtocol(scaled, sz, jacketHeight)
 		case term.ITERM2_GRAPHICS_PROTOCOL:
-			term.DisplayImageUsingITerm2Protocol(t.orignal, t.size, jacketHeight)
+			term.DisplayImageUsingITerm2Protocol(orignal, sz, jacketHeight)
 		case term.KITTY_GRAPHICS_PROTOCOL:
-			term.DisplayImageUsingKittyProtocol(t.scaled, t.size, jacketHeight)
+			term.DisplayImageUsingKittyProtocol(scaled, sz, jacketHeight)
 		}
 	} else {
 		term.MoveDownAndReset(jacketHeight)
 	}
+
 	t.emptyLine()
+
 	if chartPath == "" {
 		t.pcenterln(fmt.Sprintf("%s%s", displayDifficulty(), t.db.Title(songID, "\x1b[1m${title}\x1b[0m")))
 		t.pcenterln(t.db.Title(songID, "${artist}"))
 	} else {
 		t.pcenterln(chartPath)
 	}
+
 	t.emptyLine()
-	if !t.playing {
-		t.pcenterln(locale.Sprintf("ui line 0"))
+
+	if !playing {
+		t.pcenterln(locale.P.Sprintf("ui line 0"))
 		t.emptyLine()
 		t.emptyLine()
 	} else {
-		t.pcenterln(locale.Sprintf("Offset: %d ms", t.offset))
-		t.pcenterln(locale.Sprintf("ui line 1"))
-		t.pcenterln(locale.Sprintf("ui line 2"))
+		t.pcenterln(locale.P.Sprintf("Offset: %d ms", off))
+		t.pcenterln(locale.P.Sprintf("ui line 1"))
+		t.pcenterln(locale.P.Sprintf("ui line 2"))
 	}
+
 	t.renderMutex.Unlock()
 }
 
 func (t *tui) begin() {
 	t.firstTick = t.events[0].Timestamp
+
 	for {
 		key, err := term.ReadKey(os.Stdin, 10*time.Millisecond)
 		if err != nil {
 			log.Dief("Failed to get key from stdin: %s", err)
 		}
+
 		if key == term.KEY_ENTER || key == term.KEY_SPACE {
 			break
 		}
 	}
+
+	t.mu.Lock()
 	t.playing = true
 	t.start = time.Now().Add(-time.Duration(t.firstTick) * time.Millisecond)
 	t.offset = 0
+	t.mu.Unlock()
+
 	if len(chartPath) == 0 {
 		term.SetWindowTitle(locale.P.Sprintf("ssm: Autoplaying %s (%s)", t.db.Title(songID, "${title} :: ${artist}"), strings.ToUpper(difficulty)))
 	} else {
@@ -547,8 +471,11 @@ func (t *tui) begin() {
 }
 
 func (t *tui) addOffset(delta int) {
+	t.mu.Lock()
 	t.offset += delta
 	t.start = t.start.Add(time.Duration(-delta) * time.Millisecond)
+	t.mu.Unlock()
+
 	t.render(false)
 }
 
@@ -558,6 +485,7 @@ func (t *tui) waitForKey() {
 		if err != nil {
 			log.Dief("Failed to get key from stdin: %s", err)
 		}
+
 		switch key {
 		case term.KEY_LEFT:
 			t.addOffset(-10)
@@ -579,6 +507,7 @@ func (t *tui) deinit() error {
 	if err := term.RestoreTerminal(); err != nil {
 		return err
 	}
+
 	term.Bye()
 	return nil
 }
@@ -587,14 +516,20 @@ func (t *tui) autoplay() {
 	current := 0
 	n := len(t.events)
 	for current < n {
-		now := time.Since(t.start).Milliseconds()
+		t.mu.Lock()
+		start := t.start
+		t.mu.Unlock()
+
+		now := time.Since(start).Milliseconds()
 		event := t.events[current]
 		remaining := event.Timestamp - now
+
 		if remaining <= 0 {
 			t.controller.Send(event.Data)
 			current++
 			continue
 		}
+
 		if remaining > 10 {
 			time.Sleep(time.Duration(remaining-5) * time.Millisecond)
 		} else if remaining > 4 {
@@ -606,143 +541,110 @@ func (t *tui) autoplay() {
 func getJudgeLineCalculator() stage.JudgeLinePositionCalculator {
 	if pjskMode {
 		return stage.PJSKJudgeLinePos
-	}
-	return stage.BanGJudgeLinePos
-}
-
-// findMusicscorePath returns the chart .txt files matching a song id and
-// difficulty under the extracted assets directory for the given game mode.
-func findMusicscorePath(pjsk bool, songID int, difficulty string) ([]string, error) {
-	if pjsk {
-		return filepath.Glob(filepath.Join("./assets/sekai/assetbundle/resources/startapp/music/music_score/",
-			fmt.Sprintf("%04d_01/%s.txt", songID, difficulty)))
-	}
-	return filepath.Glob(filepath.Join("./assets/star/forassetbundle/startapp/musicscore/",
-		fmt.Sprintf("musicscore*/%03d/*_%s.txt", songID, difficulty)))
-}
-
-// extractAssetFilter selects which asset-bundle paths Extract should unpack:
-// chart, jacket and in-game skin assets under startapp (audio .acb excluded).
-func extractAssetFilter(p string) bool {
-	if strings.HasSuffix(p, ".acb.bytes") || !strings.Contains(p, "startapp") {
-		return false
-	}
-	return strings.Contains(p, "musicscore/") || strings.Contains(p, "music_score/") ||
-		strings.Contains(p, "musicjacket/") || strings.Contains(p, "jacket/") ||
-		strings.Contains(p, "ingameskin")
-}
-
-// newDefaultVTEConfig returns the baseline touch-event generation config for a
-// game mode. Callers (GUI / CLI) layer their own jitter/advanced overrides on
-// top, so the defaults live in exactly one place.
-func newDefaultVTEConfig(pjsk bool) *scores.VTEGenerateConfig {
-	c := &scores.VTEGenerateConfig{
-		TapDuration:         10,
-		FlickDuration:       60,
-		FlickReportInterval: 5,
-		FlickFactor:         1.0 / 5,
-		FlickPow:            1,
-		SlideReportInterval: 10,
-	}
-	if pjsk {
-		c.FlickFactor = 1.0 / 6
-		c.FlickDuration = 20
-	}
-	return c
-}
-
-// openController selects and opens the playback backend (adb or hid) and
-// returns a ready controller plus the preprocessed events. Shared by the GUI
-// and CLI flows; the caller owns Close() and decides how to surface the error
-// (the GUI shows it in the UI, the CLI aborts).
-func openController(conf *config.Config, backend, serial string, turnRight bool, rawEvents common.RawVirtualEvents) (controllers.Controller, []common.ViscousEventItem, error) {
-	switch backend {
-	case "adb":
-		checkOrDownload()
-		if err := adb.StartADBServer("localhost", 5037); err != nil && err != adb.ErrADBServerRunning {
-			return nil, nil, fmt.Errorf("failed to start ADB server: %w", err)
-		}
-		devices, err := adb.NewDefaultClient().Devices()
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to list ADB devices: %w", err)
-		}
-		if len(devices) == 0 {
-			return nil, nil, fmt.Errorf("%s", errNoDevice)
-		}
-		log.Debugln("ADB devices:", devices)
-		var device *adb.Device
-		if serial == "" {
-			device = adb.FirstAuthorizedDevice(devices)
-			if device == nil {
-				return nil, nil, fmt.Errorf("no authorized ADB device found")
-			}
-		} else {
-			for _, d := range devices {
-				if d.Serial() == serial {
-					device = d
-					break
-				}
-			}
-			if device == nil {
-				return nil, nil, fmt.Errorf("no device has serial %q", serial)
-			}
-			if !device.Authorized() {
-				return nil, nil, fmt.Errorf("device %q is not authorized", serial)
-			}
-		}
-		log.Debugln("Selected device:", device)
-		scrcpy := controllers.NewScrcpyController(device)
-		if err := scrcpy.Open("./"+SERVER_FILE, SERVER_FILE_VERSION); err != nil {
-			return nil, nil, fmt.Errorf("failed to connect to device: %w", err)
-		}
-		dc := conf.Get(device.Serial())
-		if dc == nil {
-			scrcpy.Close()
-			return nil, nil, fmt.Errorf("device [%s] not configured. Please add it in Settings first", device.Serial())
-		}
-		return scrcpy, scrcpy.Preprocess(rawEvents, turnRight, dc, getJudgeLineCalculator()), nil
-
-	case "hid":
-		if serial == "" {
-			serials := controllers.FindHIDDevices()
-			log.Debugln("Recognized devices:", serials)
-			if len(serials) == 0 {
-				return nil, nil, fmt.Errorf("%s", errNoDevice)
-			}
-			serial = serials[0]
-		}
-		dc := conf.Get(serial)
-		if dc == nil {
-			return nil, nil, fmt.Errorf("device [%s] not configured. Please add it in Settings first", serial)
-		}
-		hidCtrl := controllers.NewHIDController(dc)
-		if err := hidCtrl.Open(); err != nil {
-			return nil, nil, fmt.Errorf("failed to initialize HID: %w", err)
-		}
-		return hidCtrl, hidCtrl.Preprocess(rawEvents, turnRight, getJudgeLineCalculator()), nil
-
-	default:
-		return nil, nil, fmt.Errorf("unknown backend: %q", backend)
+	} else {
+		return stage.BanGJudgeLinePos
 	}
 }
 
-// play runs the CLI terminal-UI playback for the opened controller/events.
-func (t *tui) play(conf *config.Config, rawEvents common.RawVirtualEvents) {
-	ctrl, events, err := openController(conf, backend, deviceSerial, direction == "right", rawEvents)
+func (t *tui) adbBackend(conf *config.Config, rawEvents common.RawVirtualEvents) {
+	checkOrDownload()
+	if err := adb.StartADBServer("localhost", 5037); err != nil && err != adb.ErrADBServerRunning {
+		log.Fatal(err)
+	}
+
+	client := adb.NewDefaultClient()
+	devices, err := client.Devices()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if len(devices) == 0 {
+		log.Die(errNoDevice)
+	}
+
+	log.Debugln("ADB devices:", devices)
+
+	var device *adb.Device
+	if deviceSerial == "" {
+		device = adb.FirstAuthorizedDevice(devices)
+		if device == nil {
+			log.Die("No authorized devices.")
+		}
+	} else {
+		for _, d := range devices {
+			if d.Serial() == deviceSerial {
+				device = d
+				break
+			}
+		}
+
+		if device == nil {
+			log.Dief("No device has serial `%s`", deviceSerial)
+		}
+
+		if !device.Authorized() {
+			log.Dief("Found device with serial number `%s`, but that device is not authorized.", deviceSerial)
+		}
+	}
+
+	log.Debugln("Selected device:", device)
+	controller := controllers.NewScrcpyController(device)
+	if err := controller.Open("./scrcpy-server-v3.3.1", "3.3.1"); err != nil {
+		log.Die("Failed to connect to device:", err)
+	}
+	defer controller.Close()
+
+	dc := conf.Get(device.Serial())
+	events := controller.Preprocess(rawEvents, direction == "right", dc, getJudgeLineCalculator())
+
+	t.init(controller, events)
+
+	t.begin()
+
+	go t.waitForKey()
+
+	t.autoplay()
+
+	time.Sleep(300 * time.Millisecond) // take a nap
+}
+
+func (t *tui) hidBackend(conf *config.Config, rawEvents common.RawVirtualEvents) {
+	if deviceSerial == "" {
+		serials := controllers.FindHIDDevices()
+		log.Debugln("Recognized devices:", serials)
+
+		if len(serials) == 0 {
+			log.Die(errNoDevice)
+		}
+
+		deviceSerial = serials[0]
+	}
+
+	dc := conf.Get(deviceSerial)
+	controller, err := controllers.NewHIDController(dc)
 	if err != nil {
 		log.Die(err)
 	}
-	defer ctrl.Close()
-	t.init(ctrl, events)
+	controller.Open()
+	defer controller.Close()
+
+	events := controller.Preprocess(rawEvents, direction == "right", getJudgeLineCalculator())
+	t.init(controller, events)
+
 	t.begin()
+
 	go t.waitForKey()
+
 	t.autoplay()
-	time.Sleep(300 * time.Millisecond)
+
+	time.Sleep(300 * time.Millisecond) // take a nap
 }
 
 func main() {
 	log.Debugf("LANG: %s", locale.LanguageString)
 	p := locale.P
+
+	var err error
 
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), p.Sprintf("Usage of %s:", os.Args[0]))
@@ -760,16 +662,11 @@ func main() {
 	flag.BoolVar(&showDebugLog, "g", false, p.Sprintf("usage.g"))
 	flag.BoolVar(&showVersion, "v", false, p.Sprintf("usage.v"))
 
-	flag.BoolVar(&guiMode, "gui", false, "Start the graphical interface (browser GUI)")
-	flag.IntVar(&guiPort, "port", 8765, "Port used by the GUI (default 8765)")
-
 	flag.Parse()
-	// If no arguments are provided, enable GUI mode by default.
-	if len(os.Args) == 1 {
-		guiMode = true
-	}
-	// log.Fatal/Die panic with log.FatalErr so deferred cleanup still runs.
-	// Registered before term.Bye so the terminal is restored before exiting.
+
+	term.Hello()
+	defer term.Bye()
+
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(log.FatalErr); ok {
@@ -779,34 +676,30 @@ func main() {
 		}
 	}()
 
-	term.Hello()
-	defer term.Bye()
-
 	log.ShowDebug(showDebugLog)
 
-	//  GUI mode has priority.
-	if guiMode {
-		config.DisablePrompt = true
-		const CONFIG_PATH = "./config.json"
-		conf, err := config.Load(CONFIG_PATH)
-		if err != nil {
-			log.Die(err)
-		}
-		runGUI(conf)
+	if guiRequested() {
+		runGUI()
 		return
 	}
 
-	// ─── Everything below is the same as the original version ───
-
 	if extract != "" {
-		db, err := Extract(extract, extractAssetFilter)
+		db, err := Extract(extract, func(path string) bool {
+			if strings.HasSuffix(path, ".acb.bytes") || !strings.Contains(path, "startapp") {
+				return false
+			}
+
+			return strings.Contains(path, "musicscore/") || strings.Contains(path, "music_score/") || strings.Contains(path, "musicjacket/") || strings.Contains(path, "jacket/") || strings.Contains(path, "ingameskin")
+		})
 		if err != nil {
 			log.Die(err)
 		}
+
 		data, err := json.MarshalIndent(db, "", "\t")
 		if err != nil {
 			log.Die(err)
 		}
+
 		if err := os.WriteFile("./extract.json", data, 0o644); err != nil {
 			log.Die(err)
 		}
@@ -814,7 +707,6 @@ func main() {
 	}
 
 	var database db.MusicDatabase
-	var err error
 	if pjskMode {
 		database, err = db.NewSekaiDB()
 	} else {
@@ -831,6 +723,7 @@ func main() {
 	}
 
 	const CONFIG_PATH = "./config.json"
+
 	conf, err := config.Load(CONFIG_PATH)
 	if err != nil {
 		log.Die(err)
@@ -842,19 +735,27 @@ func main() {
 
 	var chartText []byte
 	if chartPath == "" {
-		pathResults, globErr := findMusicscorePath(pjskMode, songID, difficulty)
-		if globErr != nil {
-			log.Die("Failed to find musicscore file:", globErr)
+		var pathResults []string
+		if pjskMode {
+			pathResults, err = filepath.Glob(filepath.Join("./assets/sekai/assetbundle/resources/startapp/music/music_score/", fmt.Sprintf("%04d_01/%s.txt", songID, difficulty)))
+		} else {
+			pathResults, err = filepath.Glob(filepath.Join("./assets/star/forassetbundle/startapp/musicscore/", fmt.Sprintf("musicscore*/%03d/*_%s.txt", songID, difficulty)))
 		}
+		if err != nil {
+			log.Die("Failed to find musicscore file:", err)
+		}
+
 		if len(pathResults) < 1 {
 			log.Die("Musicscore not found")
 		}
+
 		log.Debugln("Musicscore loaded:", pathResults[0])
 		chartText, err = os.ReadFile(pathResults[0])
 	} else {
 		log.Debugln("Musicscore loaded:", chartPath)
 		chartText, err = os.ReadFile(chartPath)
 	}
+
 	if err != nil {
 		log.Die("Failed to load musicscore:", err)
 	}
@@ -869,19 +770,39 @@ func main() {
 		chart = scores.ParseBMS(string(chartText))
 	}
 
-	rawEvents, _ := scores.GenerateTouchEvent(newDefaultVTEConfig(pjskMode), chart)
+	genConfig := &scores.VTEGenerateConfig{
+		TapDuration:         10,
+		FlickDuration:       60,
+		FlickReportInterval: 5,
+		FlickFactor:         1.0 / 5,
+		FlickPow:            1,
+		SlideReportInterval: 10,
+	}
+	if pjskMode {
+		genConfig.FlickFactor = 1.0 / 6
+		genConfig.FlickDuration = 20
+	}
+	rawEvents := scores.GenerateTouchEvent(genConfig, chart)
 
 	t := newTui(database)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		t.play(conf, rawEvents)
+		switch backend {
+		case "adb":
+			t.adbBackend(conf, rawEvents)
+		case "hid":
+			t.hidBackend(conf, rawEvents)
+		default:
+			log.Dief("Unknown backend: %q", backend)
+		}
 		stop()
 	}()
 
 	<-ctx.Done()
+
 	if err := t.deinit(); err != nil {
 		log.Die(err)
 	}

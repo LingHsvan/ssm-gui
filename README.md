@@ -181,4 +181,5 @@ This program was heavily developed with the assistance of AI. Please use it at y
 
 * **Core Play Logic & Chart Parsing**: Credited to the original author [kvarenzn](https://github.com/kvarenzn/ssm).
 * **Web GUI Implementation**: Custom integrated control panel developed specifically for this branch.
+* **Developers**: the GUI is kept beside the upstream code so upstream updates merge cleanly — see [docs/UPSTREAM_SYNC.md](docs/UPSTREAM_SYNC.md).
 * This project is licensed under the **GPL-3.0-or-later** license.

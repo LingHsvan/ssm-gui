@@ -4,6 +4,14 @@ User-facing notes for each release. The release workflow publishes the section
 that matches the tag as the GitHub release description, so write these for
 players, not for developers.
 
+## [Unreleased]
+
+**Core**
+- Updated to the latest upstream ssm core (kvarenzn/ssm).
+- If the screen connection fails to start, or an unexpected error happens while a song is loading, the page now shows the error instead of hanging or closing the program.
+- Slide notes with position jitter now move smoothly between points.
+- Command-line mode now behaves exactly like upstream ssm.
+
 ## [3.6.1] - 2026-06-03
 
 **Playback**

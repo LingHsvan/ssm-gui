@@ -19,9 +19,9 @@ Copyright (C) 2024, 2025 kvarenzn
 	message.SetString(language.SimplifiedChinese, "usage.n", "歌曲 ID")
 	message.SetString(language.SimplifiedChinese, "usage.d", "歌曲难度")
 	message.SetString(language.SimplifiedChinese, "usage.e", "从资源路径中解包资源")
-	message.SetString(language.SimplifiedChinese, "usage.r", "设备方向，可选值：`left` (↺, 逆时针)，`right`(↻, 顺时针)。注：当使用`adb`后端时本选项被忽略")
-	message.SetString(language.SimplifiedChinese, "usage.p", "指定谱面路径(如果本选项被提供，歌曲 ID 和歌曲难度都会被忽略)")
-	message.SetString(language.SimplifiedChinese, "usage.s", "指定设备序列号(如果未提供，ssm 会使用第一个检索到的设备序列号)")
+	message.SetString(language.SimplifiedChinese, "usage.r", "设备方向，可选值：`left` （↺, 逆时针），`right`（↻, 顺时针）。注：当使用`adb`后端时本选项被忽略")
+	message.SetString(language.SimplifiedChinese, "usage.p", "指定谱面路径（如果本选项被提供，歌曲 ID 和歌曲难度都会被忽略）")
+	message.SetString(language.SimplifiedChinese, "usage.s", "指定设备序列号（如果未提供，ssm 会使用第一个检索到的设备序列号）")
 	message.SetString(language.SimplifiedChinese, "usage.k", "切换到PJSK模式")
 	message.SetString(language.SimplifiedChinese, "usage.g", "显示调试信息")
 	message.SetString(language.SimplifiedChinese, "usage.v", "显示 ssm 的版本信息并退出")
@@ -29,7 +29,7 @@ Copyright (C) 2024, 2025 kvarenzn
 	message.SetString(language.SimplifiedChinese, "(unknown)", "(未指定)")
 	message.SetString(language.SimplifiedChinese, "To use adb as the backend, the third-party component `scrcpy-server` (version %s) is required.", "要使用adb作为后端，需要第三方组件`scrcpy-server` (%s 版本)。")
 	message.SetString(language.SimplifiedChinese, "This component is developed by Genymobile and licensed under Apache License 2.0.", "这个组件是由Genymobile开发的，并以Apache License 2.0协议开源。")
-	message.SetString(language.SimplifiedChinese, "Please download it from the official release page and place it in the same directory as `ssm.exe`.", "请从官方的release页面下载，然后将它放到'ssm'(或者'ssm.exe')所在的文件夹。")
+	message.SetString(language.SimplifiedChinese, "Please download it from the official release page and place it in the same directory as `ssm.exe`.", "请从官方的release页面下载，然后将它放到'ssm'（或者'ssm.exe'）所在的文件夹。")
 	message.SetString(language.SimplifiedChinese, "Download link:", "下载链接：")
 	message.SetString(language.SimplifiedChinese, "Alternatively, ssm can automatically handle this process for you.", "或者，ssm也可以帮你自动完成这些。")
 	message.SetString(language.SimplifiedChinese, "Proceed with automatic download? [Y/n]: ", "需要自动下载吗？ [Y/n]: ")
@@ -102,26 +102,6 @@ There is NO WARRANTY, to the extent permitted by law.`)
 var LanguageString string
 
 var P *message.Printer
-var fallbackPrinter *message.Printer
-
-func Sprintf(format string, args ...any) string {
-	if P == nil {
-		if fallbackPrinter == nil {
-			fallbackPrinter = message.NewPrinter(language.English)
-		}
-		return fallbackPrinter.Sprintf(format, args...)
-	}
-
-	result := P.Sprintf(format, args...)
-	if result == format {
-		if fallbackPrinter == nil {
-			fallbackPrinter = message.NewPrinter(language.English)
-		}
-		return fallbackPrinter.Sprintf(format, args...)
-	}
-
-	return result
-}
 
 func init() {
 	regSimplifiedChinese()
@@ -137,5 +117,4 @@ func init() {
 	lang, _, _ := matcher.Match(language.Make(LanguageString))
 
 	P = message.NewPrinter(lang)
-	fallbackPrinter = message.NewPrinter(language.English)
 }

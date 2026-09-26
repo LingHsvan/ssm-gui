@@ -34,16 +34,3 @@ type ViscousEventItem struct {
 	Timestamp int64
 	Data      []byte
 }
-
-func NormalizeTouchAction(action TouchAction) (TouchAction, bool) {
-	switch action {
-	case TouchDown, TouchPointerDown:
-		return TouchDown, true
-	case TouchUp, TouchCancel, TouchOutside, TouchPointerUp:
-		return TouchUp, true
-	case TouchMove, TouchHoverMove:
-		return TouchMove, true
-	default:
-		return 0, false
-	}
-}

@@ -75,6 +75,12 @@ type RunRequest struct {
 	FlickPow            float64 `json:"flickPow"`
 }
 
+// touchResetter is implemented by backends that can lift every pointer (the
+// scrcpy/adb backend), so a stopped song never leaves a finger held down.
+type touchResetter interface {
+	ResetTouch()
+}
+
 type Server struct {
 	port int
 	conf *config.Config
@@ -467,8 +473,8 @@ func (s *Server) SetReady(ctrl controllers.Controller, events []common.ViscousEv
 	s.mu.Unlock()
 
 	// Perform a reset when ready instead of at playback start
-	if sc, ok := ctrl.(*controllers.ScrcpyController); ok {
-		sc.ResetTouch()
+	if r, ok := ctrl.(touchResetter); ok {
+		r.ResetTouch()
 	}
 
 	s.broadcastState()
@@ -572,8 +578,8 @@ done:
 	s.mu.Lock()
 	doneCtrl := s.controller
 	s.mu.Unlock()
-	if sc, ok := doneCtrl.(*controllers.ScrcpyController); ok {
-		sc.ResetTouch()
+	if r, ok := doneCtrl.(touchResetter); ok {
+		r.ResetTouch()
 	}
 	s.mu.Lock()
 	if s.state == StatePlaying {
