@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,7 +84,14 @@ func runGUI(conf *config.Config) {
 			currentCancel()
 			old := doneCh
 			runMu.Unlock()
-			<-old
+			// Bound the wait: a wedged previous run must not block the new
+			// request forever — the HTTP response no longer waits on it, but
+			// the run queue should still make progress.
+			select {
+			case <-old:
+			case <-time.After(45 * time.Second):
+				log.Infof("[GUI] previous run did not stop within 45s; starting the new request anyway")
+			}
 			runMu.Lock()
 		}
 
@@ -178,7 +186,12 @@ func runGUI(conf *config.Config) {
 			rawEvents, greatApplied := scores.GenerateTouchEvent(genConfig, chart)
 			srv.SetGreatStats(req.GreatCount, int64(greatApplied))
 
+			// Auto Detect may stop the adb server when it finishes; flag the
+			// server as busy so the in-flight open (forward / push / shell)
+			// is not cut off mid-transfer, then always release the flag.
+			srv.MarkAdbBusy(true)
 			ctrl, events, err := openController(conf, backend, deviceSerial, direction == "right", rawEvents)
+			srv.MarkAdbBusy(false)
 			if err != nil {
 				srv.SetError(err.Error())
 				return
@@ -668,26 +681,16 @@ func openController(conf *config.Config, backend, serial string, turnRight bool,
 			return nil, nil, fmt.Errorf("%s", errNoDevice)
 		}
 		log.Debugln("ADB devices:", devices)
-		var device *adb.Device
-		if serial == "" {
-			device = adb.FirstAuthorizedDevice(devices)
-			if device == nil {
-				return nil, nil, fmt.Errorf("no authorized ADB device found")
-			}
-		} else {
-			for _, d := range devices {
-				if d.Serial() == serial {
-					device = d
-					break
-				}
-			}
-			if device == nil {
-				return nil, nil, fmt.Errorf("no device has serial %q", serial)
-			}
-			if !device.Authorized() {
-				return nil, nil, fmt.Errorf("device %q is not authorized", serial)
-			}
+		// The requested serial wins while it is connected (whether it is
+		// registered is checked by conf.Get below); when it is gone — or none
+		// was requested — a registered + connected device is auto-selected,
+		// so swapping devices temporarily needs no config edit. Devices not
+		// registered in Device Management are ignored.
+		device, pickInfo, err := adb.PickDevice(devices, serial, conf.RecordedSerials())
+		if err != nil {
+			return nil, nil, err
 		}
+		log.Infof("[ADB] %s", pickInfo)
 		log.Debugln("Selected device:", device)
 		scrcpy := controllers.NewScrcpyController(device)
 		if err := scrcpy.Open("./"+SERVER_FILE, SERVER_FILE_VERSION); err != nil {
@@ -701,13 +704,33 @@ func openController(conf *config.Config, backend, serial string, turnRight bool,
 		return scrcpy, scrcpy.Preprocess(rawEvents, turnRight, dc, getJudgeLineCalculator()), nil
 
 	case "hid":
-		if serial == "" {
-			serials := controllers.FindHIDDevices()
-			log.Debugln("Recognized devices:", serials)
-			if len(serials) == 0 {
-				return nil, nil, fmt.Errorf("%s", errNoDevice)
+		serials := controllers.FindHIDDevices()
+		log.Debugln("Recognized devices:", serials)
+		if len(serials) == 0 {
+			return nil, nil, fmt.Errorf("%s", errNoDevice)
+		}
+		// Same selection semantics as the adb branch: the requested serial is
+		// kept when present (an unregistered one still fails in conf.Get
+		// below); when it is gone — or none was requested — fall back to a
+		// registered + present device, deterministically.
+		if serial == "" || !slices.Contains(serials, serial) {
+			recorded := conf.RecordedSerials()
+			candidates := make([]string, 0, len(serials))
+			for _, s := range serials {
+				if _, ok := recorded[s]; ok {
+					candidates = append(candidates, s)
+				}
 			}
-			serial = serials[0]
+			if len(candidates) == 0 {
+				return nil, nil, fmt.Errorf("no registered HID device found (connected: %s); add one via Auto Detect or in Settings first", strings.Join(serials, ", "))
+			}
+			slices.Sort(candidates)
+			if serial == "" {
+				log.Infof("[HID] auto-selected device %q among registered devices %v", candidates[0], candidates)
+			} else {
+				log.Infof("[HID] requested device %q is not connected; auto-selected %q among registered devices %v", serial, candidates[0], candidates)
+			}
+			serial = candidates[0]
 		}
 		dc := conf.Get(serial)
 		if dc == nil {
