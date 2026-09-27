@@ -21,6 +21,14 @@ func NewTexture(reader *ObjectReader) *Texture {
 		NamedObject: NewNamedObject(reader),
 	}
 
+	if t.Version.GreaterEqual(6000, 0) {
+		// Unity 6 strips ForcedFallbackFormat and DownscaleFallback from the
+		// serialized Texture; only IsAlphaChannelOptional remains.
+		t.IsAlphaChannelOptional = optional.Some(reader.Bool())
+		reader.Align(4)
+		return t
+	}
+
 	if t.Version.GreaterEqual(2017, 3) {
 		t.ForcedFallbackFormat = optional.Some(reader.S32())
 		t.DownscaleFallback = optional.Some(reader.Bool())

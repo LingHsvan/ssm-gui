@@ -76,6 +76,8 @@ func DecodeTexture2D(texture *Texture2D) (image.Image, error) {
 		return etc.Decode2A8(texture.ImageData.GetData(), int(texture.Width), int(texture.Height))
 	case ASTC_RGB_4x4:
 		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 4, 4)
+	case ASTC_RGB_5x5:
+		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 5, 5)
 	case ASTC_RGB_6x6:
 		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 6, 6)
 	case ASTC_RGB_8x8:
@@ -83,6 +85,18 @@ func DecodeTexture2D(texture *Texture2D) (image.Image, error) {
 	case ASTC_RGB_10x10:
 		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 10, 10)
 	case ASTC_RGB_12x12:
+		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 12, 12)
+	case ASTC_RGBA_4x4:
+		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 4, 4)
+	case ASTC_RGBA_5x5:
+		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 5, 5)
+	case ASTC_RGBA_6x6:
+		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 6, 6)
+	case ASTC_RGBA_8x8:
+		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 8, 8)
+	case ASTC_RGBA_10x10:
+		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 10, 10)
+	case ASTC_RGBA_12x12:
 		return astc.Decode(texture.ImageData.GetData(), int(texture.Width), int(texture.Height), 12, 12)
 	}
 

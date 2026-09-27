@@ -77,6 +77,50 @@ func isPjsk(baseDir string) bool {
 	return false
 }
 
+func isSirius(baseDir string) bool {
+	// Addressables remote catalog markers
+	for _, name := range []string{"catalog_main.bin", "RemoteCatalog/catalog_main.bin", "catalog.json"} {
+		if _, err := os.Stat(filepath.Join(baseDir, name)); err == nil {
+			return true
+		}
+	}
+
+	// game-side bundle cache directory
+	if stat, err := os.Stat(filepath.Join(baseDir, "EncryptedBundles")); err == nil && stat.IsDir() {
+		return true
+	}
+
+	// fallback: any *.bundle files at any depth
+	found := false
+	_ = filepath.WalkDir(baseDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".bundle") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+func collectSiriusBundles(baseDir string) ([]string, error) {
+	var bundles []string
+	err := filepath.WalkDir(baseDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".bundle") {
+			bundles = append(bundles, path)
+		}
+		return nil
+	})
+	return bundles, err
+}
+
 func Extract(baseDir string, pathFilter func(string) bool) (AssetFilesDatabase, error) {
 	if pathFilter == nil {
 		pathFilter = func(s string) bool {
@@ -84,17 +128,21 @@ func Extract(baseDir string, pathFilter func(string) bool) (AssetFilesDatabase, 
 		}
 	}
 
-	// detect whether this is gbp or pjsk
+	// detect whether this is gbp, pjsk or sirius
 	pjsk := isPjsk(baseDir)
-	log.Debugf("isPjsk = %v", pjsk)
+	sirius := !pjsk && isSirius(baseDir)
+	log.Debugf("isPjsk = %v, isSirius = %v", pjsk, sirius)
 
 	db := AssetFilesDatabase{}
 	manager := uni.NewAssetsManager()
 	var bundles []string
 	var err error
-	if pjsk {
+	switch {
+	case pjsk:
 		bundles, err = filepath.Glob(filepath.Join(baseDir, "**", strings.Repeat("?", 32)))
-	} else {
+	case sirius:
+		bundles, err = collectSiriusBundles(baseDir)
+	default:
 		bundles, err = filepath.Glob(filepath.Join(baseDir, strings.Repeat("?", 64)))
 	}
 	if err != nil {
@@ -114,6 +162,15 @@ func Extract(baseDir string, pathFilter func(string) bool) (AssetFilesDatabase, 
 		input = f
 		if pjsk {
 			input, err = k.NewSekaiAssetFile(input)
+			if err != nil {
+				db[bundle] = &AssetFileMeta{
+					Hash:  "?",
+					Error: err.Error(),
+				}
+				continue
+			}
+		} else if sirius {
+			input, err = k.NewSiriusAssetFile(input, k.SiriusFilename(filepath.Base(bundle)))
 			if err != nil {
 				db[bundle] = &AssetFileMeta{
 					Hash:  "?",

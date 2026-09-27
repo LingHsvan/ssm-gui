@@ -634,13 +634,25 @@ func findMusicscorePath(pjsk bool, songID int, difficulty string) ([]string, err
 
 // extractAssetFilter selects which asset-bundle paths Extract should unpack:
 // chart, jacket and in-game skin assets under startapp (audio .acb excluded).
+// BanG Dream! Our Notes (sirius) keeps its charts under
+// Assets/AddressableResources/Live/MusicScore/* and its jackets under
+// Assets/Image/Jacket/*, i.e. outside startapp, so those are allowed directly.
 func extractAssetFilter(p string) bool {
-	if strings.HasSuffix(p, ".acb.bytes") || !strings.Contains(p, "startapp") {
+	lower := strings.ToLower(p)
+	if strings.HasSuffix(lower, ".acb.bytes") {
 		return false
 	}
-	return strings.Contains(p, "musicscore/") || strings.Contains(p, "music_score/") ||
-		strings.Contains(p, "musicjacket/") || strings.Contains(p, "jacket/") ||
-		strings.Contains(p, "ingameskin")
+
+	if strings.Contains(lower, "musicscore") || strings.Contains(lower, "jacket") {
+		return true
+	}
+
+	if !strings.Contains(p, "startapp") {
+		return false
+	}
+
+	return strings.Contains(lower, "music_score/") || strings.Contains(lower, "musicjacket/") ||
+		strings.Contains(lower, "jacket/") || strings.Contains(lower, "ingameskin")
 }
 
 // newDefaultVTEConfig returns the baseline touch-event generation config for a
