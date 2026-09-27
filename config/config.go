@@ -106,6 +106,19 @@ func (c *Config) Snapshot() map[string]DeviceConfig {
 	return out
 }
 
+// RecordedSerials returns the set of serials present in the device map, safe
+// to read without the lock. Callers use it to tell "registered in Device
+// Management" apart from "merely connected".
+func (c *Config) RecordedSerials() map[string]struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]struct{}, len(c.Devices))
+	for s := range c.Devices {
+		out[s] = struct{}{}
+	}
+	return out
+}
+
 func Load(path string) (*Config, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if _, err := os.Create(path); err != nil {
