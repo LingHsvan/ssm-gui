@@ -70,11 +70,31 @@ func FoldConfusables(s string) string {
 	return b.String()
 }
 
-// Normalize lowercases, strips whitespace / punctuation / symbols and folds
-// OCR-confusable glyphs. Applied to both sides of every comparison.
+// foldHanzi maps each rune through the generated fold table in hanzi_fold.go,
+// which folds simplified Chinese and Japanese shinjitai onto one canonical
+// glyph per character class. Runes that are not in the table are kept as-is.
+func foldHanzi(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if c, ok := hanziFold[r]; ok {
+			r = c
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// Normalize lowercases, strips whitespace / punctuation / symbols, folds
+// OCR-confusable katakana and folds hanzi variants. Applied to both sides of
+// every comparison.
+//
+// Folding hanzi matters because the game draws titles with traditional and
+// shinjitai glyphs while songs.json holds simplified ones: without it the OCR
+// reading 「証命讚歌」 cannot reach the title 「证命赞歌」 (#100017).
 func Normalize(s string) string {
 	s = strings.TrimSpace(strings.ToLower(s))
-	return FoldConfusables(nonWordRE.ReplaceAllString(s, ""))
+	return foldHanzi(FoldConfusables(nonWordRE.ReplaceAllString(s, "")))
 }
 
 // Score rates how well the OCR query matches a song title. Score tiers
