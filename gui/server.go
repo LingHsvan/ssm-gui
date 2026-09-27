@@ -355,6 +355,47 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleTuning reads and writes the GUI's fine-tuning panels (humanization
+// jitter + advanced parameters) so the user's tuning survives a restart.
+//
+// GET returns both panels; POST stores the jitter panel and, when a mode is
+// given, that mode's advanced parameters. Advanced values are per-game-mode
+// because each mode ships its own defaults.
+func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jitter, advanced := s.conf.Tuning()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"jitter":   jitter,
+			"advanced": advanced,
+		})
+	case http.MethodPost:
+		var body struct {
+			Mode     string                 `json:"mode"`
+			Jitter   *config.JitterConfig   `json:"jitter"`
+			Advanced *config.AdvancedConfig `json:"advanced"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// An empty mode means "jitter only": NormalizeMode would fold it into
+		// bang and overwrite that mode's bucket.
+		mode := ""
+		if body.Mode != "" {
+			mode = common.NormalizeMode(body.Mode)
+		}
+		if err := s.conf.SetTuning(body.Jitter, mode, body.Advanced); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleSongDB(w http.ResponseWriter, r *http.Request) {
 	mode := common.NormalizeMode(r.URL.Query().Get("mode"))
 	w.Header().Set("Content-Type", "application/json")
@@ -818,6 +859,7 @@ func (s *Server) Start() (string, error) {
 	mux.HandleFunc("/api/offset", s.handleOffset)
 	mux.HandleFunc("/api/restart", s.handleRestart)
 	mux.HandleFunc("/api/device", s.handleDevice)
+	mux.HandleFunc("/api/tuning", s.handleTuning)
 	mux.HandleFunc("/api/extract", s.handleExtract)
 	mux.HandleFunc("/api/songdb", s.handleSongDB)
 	mux.HandleFunc("/api/ournotes-jacket", s.handleOurNotesJacket)

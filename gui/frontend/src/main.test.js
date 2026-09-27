@@ -51,6 +51,17 @@ const devices = { TESTSERIAL: { width: 1080, height: 2340 } };
 let detectAdbResp = { serial: 'TESTSERIAL' };
 let detectSongResp = { matched: false, candidates: [] };
 
+// Persisted tuning served by /api/tuning. The saved bang bucket deliberately
+// differs from the built-in defaults (tapDuration 22 vs 10, flickPow 8 vs 10)
+// so a test can tell "restored from config.json" apart from "built-in default",
+// and the jitter panel exercises the slider restore.
+let tuningResp = {
+  jitter: { timing: 12, position: 3, tapDur: 0, grOffset: 90, grCount: 0 },
+  advanced: {
+    bang: { tapDuration: 22, flickDuration: 55, flickReportInterval: 4, slideReportInterval: 12, flickLead: 0, flickFactor: 20, flickPow: 8 },
+  },
+};
+
 function jsonResp(obj) {
   return Promise.resolve({
     ok: true,
@@ -66,6 +77,7 @@ function mockFetch(url, init) {
   if (u.includes('/locales/zh-TW.json')) return jsonResp(zhTwLocale);
   if (u.includes('/locales/')) return jsonResp(enLocale);
   if (u.includes('/api/device')) return jsonResp(devices);
+  if (u.includes('/api/tuning')) return jsonResp(tuningResp);
   if (u.includes('/api/songdb')) return jsonResp(songDB);
   if (u.includes('/api/detect-adb')) return jsonResp(detectAdbResp);
   if (u.includes('/api/detect-song')) return jsonResp(detectSongResp);
@@ -114,6 +126,13 @@ describe('init', () => {
     expect(row).toBeTruthy();
     expect(row.textContent).toContain('TESTSERIAL');
     expect(document.querySelector('#dev-list [data-action="deleteDevice"]').dataset.serial).toBe('TESTSERIAL');
+  });
+
+  it('restores the persisted tuning on load', () => {
+    expect(fetchCalls.some(([u]) => u.includes('/api/tuning'))).toBe(true);
+    // The jitter slider and its readout came from the persisted panel.
+    expect(document.getElementById('sld-timing').value).toBe('12');
+    expect(document.getElementById('val-timing').textContent).toBe('±12 ms');
   });
 });
 
@@ -206,6 +225,34 @@ describe('humanization + advanced sliders', () => {
     expect(document.getElementById('val-flickPow').textContent).toBe('1.5');
     setInput('#sld-flickLead', '30');
     expect(document.getElementById('val-flickLead').textContent).toBe('30');
+  });
+});
+
+describe('tuning persistence', () => {
+  it('applies the persisted advanced parameters when a mode is selected', () => {
+    click('[data-action="setMode"][data-arg="bang"]');
+    // Only the saved bang bucket is served, so these come from the overlay
+    // rather than from the built-in defaults.
+    expect(document.getElementById('sld-tapDuration').value).toBe('22');
+    expect(document.getElementById('sld-flickPow').value).toBe('8');
+    // A mode with nothing persisted falls back to its own defaults.
+    click('[data-action="setMode"][data-arg="ournotes"]');
+    expect(document.getElementById('sld-flickFactor').value).toBe('25');
+    expect(document.getElementById('sld-flickLead').value).toBe('30');
+  });
+
+  it('writes jitter and advanced edits back to /api/tuning', async () => {
+    fetchCalls.length = 0;
+    setInput('#sld-timing', '30');   // debounced
+    await flush(400);
+
+    const post = fetchCalls.find(([u, i]) => u.includes('/api/tuning') && i && i.method === 'POST');
+    expect(post).toBeTruthy();
+    const body = JSON.parse(post[1].body);
+    expect(body.mode).toBeTruthy();
+    expect(body.jitter).toMatchObject({ timing: 30 });
+    expect(typeof body.advanced.flickFactor).toBe('number');
+    expect(typeof body.advanced.flickLead).toBe('number');
   });
 });
 

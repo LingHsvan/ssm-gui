@@ -208,9 +208,83 @@ function renderJitter(key) {
   }
 }
 
-function renderAllJitters() { ['timing', 'position', 'tapDur', 'grOffset', 'grCount'].forEach(renderJitter); }
-function onJitter(key) { renderJitter(key); }
-function onGreatCountInput() { renderJitter('grCount'); }
+const JITTER_KEYS = ['timing', 'position', 'tapDur', 'grOffset', 'grCount'];
+
+function renderAllJitters() { JITTER_KEYS.forEach(renderJitter); }
+function onJitter(key) { renderJitter(key); saveTuning(); }
+function onGreatCountInput() { renderJitter('grCount'); saveTuning(); }
+
+// ══ tuning persistence ═════════════════════════════════════
+// Both fine-tuning panels are persisted to the server's config.json, so a
+// restart (or a second tab) keeps the user's tuning. Advanced values are stored
+// per game mode, because each mode ships its own defaults.
+let savedAdvanced = {};
+let _tuningLoaded = false;
+let _tuningTimer = null;
+
+function jitterValues() {
+  const out = {};
+  JITTER_KEYS.forEach(function (k) {
+    const el = k === 'grCount' ? document.getElementById('inp-grCount') : document.getElementById('sld-' + k);
+    out[k] = parseInt(el && el.value) || 0;
+  });
+  return out;
+}
+
+function advancedValues() {
+  const out = {};
+  Object.keys(ADV_DEFAULTS).forEach(function (k) {
+    const el = document.getElementById('sld-' + k);
+    out[k] = parseInt(el && el.value) || 0;
+  });
+  return out;
+}
+
+// Debounced: dragging a slider emits one input event per step.
+function saveTuning() {
+  // Skip the programmatic resets that run before the persisted values have been
+  // applied, so only genuine edits are written back.
+  if (!_tuningLoaded) return;
+  if (_tuningTimer) clearTimeout(_tuningTimer);
+  _tuningTimer = setTimeout(function () {
+    fetch('/api/tuning', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: S.mode, jitter: jitterValues(), advanced: advancedValues() }),
+    });
+  }, 300);
+}
+
+function applyJitter(cfg) {
+  if (!cfg) return;
+  JITTER_KEYS.forEach(function (k) {
+    const el = k === 'grCount' ? document.getElementById('inp-grCount') : document.getElementById('sld-' + k);
+    if (el && cfg[k] != null) el.value = cfg[k];
+  });
+  renderAllJitters();
+}
+
+// Overlay persisted advanced values onto the built-in defaults for a mode, so
+// the resetAdvanced() that follows every mode switch restores them.
+function applySavedAdvanced(mode) {
+  const saved = savedAdvanced[mode];
+  if (!saved) return false;
+  Object.keys(saved).forEach(function (k) {
+    if (k in ADV_DEFAULTS && saved[k] != null) ADV_DEFAULTS[k] = saved[k];
+  });
+  return true;
+}
+
+function loadTuning() {
+  fetch('/api/tuning').then(function (r) { return r.json(); }).then(function (d) {
+    d = d || {};
+    savedAdvanced = d.advanced || {};
+    applyJitter(d.jitter);
+    if (applySavedAdvanced(S.mode)) resetAdvanced();
+  }).catch(function () {
+    // A failed read simply means "nothing persisted yet"; editing still works.
+  }).then(function () { _tuningLoaded = true; });
+}
 
 // ══ state ══════════════════════════════════════════════════
 const S = { backend: 'adb', diff: 3, orient: 'left', mode: 'bang', state: 0, offset: 0, songId: 0, songData: null, db: null, dropIdx: -1, _lastLogState: -1, _lastGreatSig: '' };
@@ -306,6 +380,7 @@ function setMode(m) {
     ADV_DEFAULTS.flickLead = m === 'ournotes' ? 30 : 0;
     if (S.diff > maxDiffIndex()) S.diff = 3;
   }
+  applySavedAdvanced(m);
   updateDiffLabels();
   setDiff(S.diff);
   resetAdvanced();
@@ -1217,6 +1292,7 @@ function onAdvanced(key) {
     el.textContent = raw;
   }
   el.style.color = 'var(--blue)';
+  saveTuning();
 }
 function resetAdvanced() {
   Object.keys(ADV_DEFAULTS).forEach(function (key) {
@@ -1252,6 +1328,7 @@ setBackend(S.backend);
 updateDiffLabels();
 resetAdvanced();
 loadDevices();
+loadTuning();
 // Warm the song DB at startup so song search and Detect Song have titles
 // available immediately (backend serves it from local cache).
 loadDB(function () {});

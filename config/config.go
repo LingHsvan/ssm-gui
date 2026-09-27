@@ -18,6 +18,30 @@ type DeviceConfig struct {
 	Height int    `json:"height"`
 }
 
+// JitterConfig mirrors the GUI's "Humanization (Jitter)" panel. Values are
+// stored in the same units the sliders hold, so restoring them is a plain
+// assignment and no scaling can drift.
+type JitterConfig struct {
+	Timing   int64 `json:"timing"`   // ±ms
+	Position int64 `json:"position"` // index into the GUI's position map (0..10)
+	TapDur   int64 `json:"tapDur"`   // ±ms
+	GrOffset int64 `json:"grOffset"` // ms
+	GrCount  int64 `json:"grCount"`  // exact number of Greats, 0 = disabled
+}
+
+// AdvancedConfig mirrors the GUI's "Advanced Parameters" panel for one game
+// mode. FlickFactor and FlickPow are slider units too (the GUI divides them by
+// 100 and 10 respectively), so what is stored is exactly what the sliders show.
+type AdvancedConfig struct {
+	TapDuration         int64 `json:"tapDuration"`
+	FlickDuration       int64 `json:"flickDuration"`
+	FlickReportInterval int64 `json:"flickReportInterval"`
+	SlideReportInterval int64 `json:"slideReportInterval"`
+	FlickLead           int64 `json:"flickLead"`
+	FlickFactor         int64 `json:"flickFactor"`
+	FlickPow            int64 `json:"flickPow"`
+}
+
 type Config struct {
 	Path    string                   `json:"-"`
 	Devices map[string]*DeviceConfig `json:"devices"`
@@ -25,6 +49,12 @@ type Config struct {
 	// SongDetectROI persists calibrated normalized [x,y,w,h] crops for the
 	// /api/detect-song endpoint, keyed by game mode ("bang"/"pjsk").
 	SongDetectROI map[string][4]float64 `json:"songDetectROI,omitempty"`
+
+	// Jitter and Advanced persist the two GUI fine-tuning panels so tuning
+	// survives a restart. Advanced is keyed by game mode because each mode has
+	// its own defaults (and therefore its own tuning).
+	Jitter   *JitterConfig              `json:"jitter,omitempty"`
+	Advanced map[string]*AdvancedConfig `json:"advanced,omitempty"`
 
 	// mu guards Devices and the on-disk file. The GUI mutates the device
 	// map from HTTP handler goroutines while playback may read it, so all
@@ -117,6 +147,47 @@ func (c *Config) RecordedSerials() map[string]struct{} {
 		out[s] = struct{}{}
 	}
 	return out
+}
+
+// SetTuning stores the jitter panel and, when mode is non-empty, that mode's
+// advanced parameters, then persists the config.
+func (c *Config) SetTuning(jitter *JitterConfig, mode string, advanced *AdvancedConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if jitter != nil {
+		j := *jitter
+		c.Jitter = &j
+	}
+	if mode != "" && advanced != nil {
+		if c.Advanced == nil {
+			c.Advanced = map[string]*AdvancedConfig{}
+		}
+		a := *advanced
+		c.Advanced[mode] = &a
+	}
+	return c.saveLocked()
+}
+
+// Tuning returns copies of the persisted panels, safe to use without the lock.
+// The advanced map is keyed by game mode; jitter is nil when never saved.
+func (c *Config) Tuning() (*JitterConfig, map[string]AdvancedConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var jitter *JitterConfig
+	if c.Jitter != nil {
+		j := *c.Jitter
+		jitter = &j
+	}
+
+	advanced := make(map[string]AdvancedConfig, len(c.Advanced))
+	for mode, a := range c.Advanced {
+		if a != nil {
+			advanced[mode] = *a
+		}
+	}
+	return jitter, advanced
 }
 
 func Load(path string) (*Config, error) {
