@@ -167,7 +167,7 @@
 
           <div class="field">
             <label data-i18n="song.search.label">Search by name</label>
-            <div class="sw relative">
+            <div class="sw sw-search relative">
               <input type="text" id="q" data-i18n-placeholder="song.search.placeholder" autocomplete="off"
                 data-oninput="onQInput" data-onkeydown="onQKey" data-onfocus="onQFocus">
               <button
@@ -187,8 +187,11 @@
                   <span data-i18n="song.detect.btn">Detect Song</span>
                 </button>
               </div>
-              <input type="number" id="song-id" data-i18n-placeholder="song.id.placeholder" min="1"
-                data-oninput="onManualId">
+              <div class="sw relative">
+                <input type="number" id="song-id" data-i18n-placeholder="song.id.placeholder" min="1"
+                  data-oninput="onManualId">
+                <div class="drop" id="det-cand"></div>
+              </div>
             </div>
 
             <div class="field">

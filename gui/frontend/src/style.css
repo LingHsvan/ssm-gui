@@ -1382,6 +1382,15 @@ html[data-theme='light'] .sel-bar .sb-title {
   z-index: 260;
 }
 
+/* The search wrapper hosts #drop and must stack above the sibling song-id
+   wrapper (also .sw, later in the DOM) — otherwise the song-id input paints
+   over an open search dropdown: .drop's z-index 9999 stays trapped inside
+   this wrapper's stacking context. */
+.song-search-card .sw-search {
+  position: relative;
+  z-index: 280;
+}
+
 .drop {
   @apply absolute top-full left-0 right-0 mt-2 rounded-xl max-h-60 overflow-y-auto hidden;
   background: #1a1a1a;

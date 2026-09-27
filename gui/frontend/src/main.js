@@ -1,4 +1,5 @@
 import './style.css'
+import { foldHanzi } from './hanzi-fold.js';
 // ══ i18n engine ════════════════════════════════════════════
 const I18n = (function () {
   const langs = {};
@@ -274,6 +275,7 @@ function navToSearch() {
 }
 function setMode(m) {
   S.mode = m; S.db = null; if (S.songId) clearSong();
+  closeDetCand();
 
   // Update active state on the mode buttons.
   ['bang', 'pjsk'].forEach(function (x) {
@@ -337,6 +339,9 @@ function setDiffAvail(avail) {
 // ══ search ═════════════════════════════════════════════════
 let qTimer = null;
 function onQInput() {
+  // A stale OCR candidate picker from Detect Song must not stack with the
+  // search suggestion list once the user starts typing here.
+  closeDetCand();
   const v = document.getElementById('q').value;
   document.getElementById('sc').style.display = v ? 'block' : 'none';
   clearTimeout(qTimer); if (!v.trim()) { closeDrop(); return; }
@@ -518,26 +523,35 @@ function normalizeForSearch(s) {
 }
 
 function doSearch(q) {
+  closeDetCand(); // same guard for the focus path (onQFocus -> doSearch)
   // First search has to fetch the (large) song DB; show feedback instead of a
   // dead-looking empty box, and surface failures in the dropdown itself.
   if (!S.db) showDropHint(t('drop.loading'));
   loadDB(function (db) {
     const ql = q.toLowerCase(), qc = normalizeForSearch(q), res = [];
+    // Folded query variants: simplified / shinjitai / lookalike-katakana
+    // input is folded onto canonical glyphs so it can match the titles.
+    const qf = foldHanzi(q), qfl = qf.toLowerCase(), qfc = normalizeForSearch(qf);
     Object.keys(db.songs).forEach(function (sid) {
       const id = parseInt(sid), song = db.songs[sid];
       if (!song || !song.musicTitle) return;
       // Cache the lowercased / normalized search keys per song so they are
       // computed once instead of on every keystroke across the whole library.
+      // Each entry: [rawLower, rawNorm, foldedLower, foldedNorm].
       let si = song.__si;
       if (!si) {
         const names = (song.__searchNames && song.__searchNames.length) ? song.__searchNames : song.musicTitle;
         si = song.__si = (names || []).reduce(function (acc, n) {
-          if (n) acc.push([String(n).toLowerCase(), normalizeForSearch(n)]);
+          if (n) {
+            const folded = foldHanzi(n);
+            acc.push([String(n).toLowerCase(), normalizeForSearch(n), folded.toLowerCase(), normalizeForSearch(folded)]);
+          }
           return acc;
         }, []);
       }
       const hit = si.some(function (e) {
-        return e[0].indexOf(ql) >= 0 || (qc && e[1].indexOf(qc) >= 0);
+        return e[0].indexOf(ql) >= 0 || (qc && e[1].indexOf(qc) >= 0) ||
+          e[2].indexOf(qfl) >= 0 || (qfc && e[3].indexOf(qfc) >= 0);
       });
       if (!hit) return;
       const band = db.bands[song.bandId];
@@ -578,6 +592,8 @@ function renderDrop(res) {
 }
 
 function closeDrop() { document.getElementById('drop').classList.remove('open'); S.dropIdx = -1; }
+// Closes the OCR candidate picker (populated by renderDetCands) if present.
+function closeDetCand() { const el = document.getElementById('det-cand'); if (el) el.classList.remove('open'); }
 function onQKey(e) {
   const items = document.getElementById('drop').querySelectorAll('.di');
   if (e.key === 'ArrowDown') { e.preventDefault(); S.dropIdx = Math.min(S.dropIdx + 1, items.length - 1); hiDrop(items); }
@@ -586,7 +602,8 @@ function onQKey(e) {
   else if (e.key === 'Escape') closeDrop();
 }
 function hiDrop(items) { items.forEach(function (el, i) { el.classList.toggle('hi', i === S.dropIdx); if (i === S.dropIdx) el.scrollIntoView({ block: 'nearest' }); }); }
-document.addEventListener('click', function (e) { if (!e.target.closest('.sw')) closeDrop(); });
+document.addEventListener('click', function (e) { if (!e.target.closest('.sw')) { closeDrop(); closeDetCand(); } });
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeDetCand(); });
 
 function selSong(id) {
   loadDB(function (db) {
@@ -597,7 +614,7 @@ function selSong(id) {
     document.getElementById('sb-title').textContent = title;
     document.getElementById('sel-bar').classList.add('show');
     document.getElementById('q').value = ''; document.getElementById('sc').style.display = 'none';
-    document.getElementById('song-id').value = id; closeDrop();
+    document.getElementById('song-id').value = id; closeDrop(); closeDetCand();
     const avail = Object.keys(song.difficulty || {}).map(Number).sort();
     setDiffAvail(avail.length ? avail : null);
     log('song-log', '#' + id + ' ' + title, 'ok');
@@ -608,7 +625,7 @@ function clearSong() {
   document.getElementById('sel-bar').classList.remove('show');
   document.getElementById('song-id').value = '';
   document.getElementById('q').value = ''; document.getElementById('sc').style.display = 'none';
-  setDiffAvail(null); closeDrop();
+  setDiffAvail(null); closeDrop(); closeDetCand();
 }
 function onManualId() {
   const v = parseInt(document.getElementById('song-id').value) || 0;
@@ -854,23 +871,17 @@ function buildNowPlaying() {
 function submitRun() {
   const sid = parseInt(document.getElementById('song-id').value) || S.songId || 0;
   const cp = document.getElementById('chart-path').value.trim();
-  let ds = document.getElementById('dev-serial').value.trim();
+  const ds = document.getElementById('dev-serial').value.trim();
   if (!sid && !cp) { log('song-log', t('log.no.song'), 'err'); return; }
 
-  const dsInput = document.getElementById('dev-serial');
+  const savedDevices = S.devices || {};
+  const noSavedDevices = Object.keys(savedDevices).length === 0;
 
-  if (!ds) {
-      const savedSerials = Object.keys(S.devices || {});
-      if (savedSerials.length > 0) {
-        ds = savedSerials[0];
-        dsInput.value = ds;
-        log('song-log', t('log.serial.auto') + ds, 'info');
-      }
-    }
-
-  const isConfigured = S.devices && S.devices[ds];
-
-  if (!ds || !isConfigured) {
+  // Guided redirect to Settings: nothing can be resolved locally when no
+  // device is registered at all, or when the typed serial is not registered.
+  // A blank serial with registered devices is fine — the backend picks a
+  // registered, connected one (devices may be swapped between runs).
+  if ((!ds && noSavedDevices) || (ds && !savedDevices[ds])) {
     const errorMsg = !ds
       ? t('log.serial.required')
       : t('log.serial.unconfigured.pre') + ds + t('log.serial.unconfigured.post');
@@ -901,6 +912,10 @@ function submitRun() {
     }, 50);
     return;
   }
+
+  // Empty serial: the backend auto-selects among registered + connected
+  // devices (handles a temporarily swapped device without editing settings).
+  if (!ds) log('song-log', t('log.serial.autopick'), 'info');
 
   const tRaw = parseInt(document.getElementById('sld-timing').value) || 0;
   const pRaw = parseInt(document.getElementById('sld-position').value) || 0;
@@ -1024,8 +1039,10 @@ function detectPreview(saveAfter, useServerRoi) {
       const f = document.getElementById('det-frame'), c = document.getElementById('det-crop');
       if (d.frameJpeg) { f.src = 'data:image/jpeg;base64,' + d.frameJpeg; }
       if (d.cropPng) { c.src = 'data:image/png;base64,' + d.cropPng; }
+      const cands = d.candidates || [];
       document.getElementById('det-info').textContent =
-        (d.matched ? '✓ #' + d.songId + ' ' + d.title + ' (' + d.score + ')' : '✗') +
+        (d.matched ? '✓ #' + d.songId + ' ' + d.title + ' (' + d.score + ')' :
+          '✗' + (cands.length ? ' ' + cands.slice(0, 3).map(function (cc) { return '#' + cc.songId + ' ' + cc.title + ' (' + cc.score + ')'; }).join(' | ') : '')) +
         '  [' + (d.texts || []).join(' | ') + ']';
       if (saveAfter) log('song-log', t('log.detect.roisaved'), 'ok');
     })
@@ -1053,6 +1070,7 @@ function detectSong() {
   // Never touch adb/libusb mid-song; the Ready (armed/matchmaking) state is
   // allowed — detection releases the stale arm and the user re-Loads.
   if (S.state === 2) { log('song-log', t('log.detect.busy'), 'err'); return; }
+  closeDetCand();
   const btn = document.getElementById('detect-song-btn');
   const orig = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; btn.textContent = t('song.detect.running'); }
@@ -1079,6 +1097,21 @@ function detectSong() {
         // song DB is lazy-loaded, so make sure it is ready first, otherwise
         // onManualId cannot resolve the title/difficulties.
         loadDB(function () { onManualId(); });
+      } else if (Array.isArray(d.candidates) && d.candidates.length === 1) {
+        // Exactly one fuzzy candidate: auto-apply it — asking the user to
+        // pick from a single-entry list is pointless. Land it through the
+        // same manual-id path as a match so the title/difficulties resolve;
+        // the candidate list stays closed (closeDetCand above).
+        const only = d.candidates[0];
+        log('song-log', t('log.detect.candone') + ' #' + only.songId + ' ' + only.title + ' (' + only.score + ', ' + tmsg + ')', 'info');
+        const idInput = document.getElementById('song-id');
+        if (idInput) idInput.value = only.songId;
+        loadDB(function () { onManualId(); });
+      } else if (Array.isArray(d.candidates) && d.candidates.length >= 2) {
+        // Fuzzy-only result: offer the scored candidates so the user picks
+        // one, mirroring the "type a partial name" search flow.
+        log('song-log', t('log.detect.candidates') + d.candidates.length, 'info');
+        renderDetCands(d.candidates);
       } else {
         log('song-log', t('log.detect.nomatch') + '[' + (d.texts || []).join(' / ') + '] (' + tmsg + ')', 'err');
       }
@@ -1087,24 +1120,57 @@ function detectSong() {
     .finally(function () { if (btn) { btn.disabled = false; btn.style.opacity = ''; btn.innerHTML = orig; } });
 }
 
+// Renders the fuzzy OCR candidates under the song-id field. Rows reuse the
+// song search dropdown styles; clicks route through selSong via delegation
+// (which also closes this dropdown).
+function renderDetCands(cands) {
+  const drop = document.getElementById('det-cand');
+  if (!drop) return;
+  drop.innerHTML = cands.map(function (c) {
+    return '<div class="di" data-action="selSong" data-arg="' + c.songId + '">'
+      + '<span class="di-id">#' + c.songId + '</span>'
+      + '<div class="di-info"><div class="di-title">' + esc(c.title || '') + '</div></div>'
+      + '<div class="di-diffs"><span class="di-d">' + c.score + '</span></div>'
+      + '</div>';
+  }).join('');
+  drop.classList.add('open');
+}
+
 function autoDetectDevice() {
   const dsInput = document.getElementById('dev-serial');
   dsInput.placeholder = t('log.detect.detecting');
 
-  fetch('/api/detect-adb')
+  // The backend probes the adb server with its own deadline; abort the
+  // request client-side as well so the "detecting…" placeholder can never
+  // spin forever when the server itself is wedged.
+  const abort = new AbortController();
+  const abortTimer = setTimeout(function () { abort.abort(); }, 20000);
+
+  fetch('/api/detect-adb', { signal: abort.signal })
     .then(function (r) { return r.json(); })
     .then(function (d) {
+      clearTimeout(abortTimer);
+      dsInput.placeholder = '';
       if (d.serial) {
         dsInput.value = d.serial;
-        log('song-log', t('log.detect.found') + d.serial, 'ok');
+        if (d.saved === 'added') {
+          log('song-log', t('log.detect.devadded') + d.serial + ' (' + d.width + ' × ' + d.height + ')', 'ok');
+        } else if (d.saved === 'updated') {
+          log('song-log', t('log.detect.devupdated') + d.serial + ' (' + d.width + ' × ' + d.height + ')', 'ok');
+        } else {
+          log('song-log', t('log.detect.found') + d.serial, 'ok');
+        }
+        // The device was likely added/changed server-side: refresh the saved
+        // list used by submitRun and the Settings pane.
+        loadDevices();
       } else {
         log('song-log', t('log.detect.none'), 'err');
-        dsInput.placeholder = "";
       }
     })
     .catch(function (e) {
+      clearTimeout(abortTimer);
       log('song-log', t('log.detect.fail'), 'err');
-      dsInput.placeholder = "";
+      dsInput.placeholder = '';
     });
 }
 

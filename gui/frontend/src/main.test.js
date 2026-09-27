@@ -28,11 +28,28 @@ const songDB = {
       bandId: 1,
       jacketImage: ['exist'],
     },
+    // Search-glyph-fold fixtures: a shinjitai title and a katakana title.
+    773: {
+      musicTitle: ['かぼーんっと極楽☆湯～とぴあ！', 'かぼーんっと極樂☆湯～とぴあ！'],
+      difficulty: { 0: { playLevel: 5 }, 1: { playLevel: 12 } },
+      bandId: 1,
+      jacketImage: ['kabon'],
+    },
+    77: {
+      musicTitle: ['ロミオ', 'ロミオ'],
+      difficulty: { 0: { playLevel: 8 }, 1: { playLevel: 15 } },
+      bandId: 1,
+      jacketImage: ['romeo'],
+    },
   },
   bands: { 1: { bandName: ['バンド', 'Band', '樂團', '乐团', ''] } },
 };
 
 const devices = { TESTSERIAL: { width: 1080, height: 2340 } };
+
+// Mutable per-test responses for the detect endpoints.
+let detectAdbResp = { serial: 'TESTSERIAL' };
+let detectSongResp = { matched: false, candidates: [] };
 
 function jsonResp(obj) {
   return Promise.resolve({
@@ -50,7 +67,8 @@ function mockFetch(url, init) {
   if (u.includes('/locales/')) return jsonResp(enLocale);
   if (u.includes('/api/device')) return jsonResp(devices);
   if (u.includes('/api/songdb')) return jsonResp(songDB);
-  if (u.includes('/api/detect-adb')) return jsonResp({ serial: 'TESTSERIAL' });
+  if (u.includes('/api/detect-adb')) return jsonResp(detectAdbResp);
+  if (u.includes('/api/detect-song')) return jsonResp(detectSongResp);
   return jsonResp({}); // run / start / stop / offset / extract / kill-adb
 }
 
@@ -67,6 +85,11 @@ beforeAll(async () => {
   // Real markup from index.html (scripts in innerHTML stay inert).
   const doc = new DOMParser().parseFromString(htmlRaw, 'text/html');
   document.documentElement.innerHTML = doc.documentElement.innerHTML;
+
+  // jsdom implements no scrolling; main.js calls scrollIntoView in a couple
+  // of delayed UI niceties (Settings redirect, search focus). Stub it so
+  // those timers cannot throw uncaught TypeErrors into later tests.
+  window.Element.prototype.scrollIntoView = function () {};
 
   globalThis.EventSource = MockEventSource;
   globalThis.fetch = vi.fn(mockFetch);
@@ -172,6 +195,31 @@ describe('search + song selection', () => {
     expect(document.getElementById('sb-id').textContent).toBe('#325');
     expect(document.getElementById('song-id').value).toBe('325');
     expect(document.getElementById('sel-bar').classList.contains('show')).toBe(true);
+  });
+});
+
+describe('search glyph folding (simplified / lookalike input)', () => {
+  it('finds the shinjitai title from simplified input (极乐 -> 極楽)', async () => {
+    setInput('#q', '极乐');
+    await flush(220); // debounce + cached DB
+    const row = document.querySelector('#drop .di[data-action="selSong"][data-arg="773"]');
+    expect(row).toBeTruthy();
+    expect(row.textContent).toContain('かぼーんっと');
+  });
+
+  it('finds the katakana title from lookalike kanji input (口三才 -> ロミオ)', async () => {
+    setInput('#q', '口三才');
+    await flush(220);
+    const row = document.querySelector('#drop .di[data-action="selSong"][data-arg="77"]');
+    expect(row).toBeTruthy();
+    expect(row.textContent).toContain('ロミオ');
+  });
+
+  it('still finds the katakana title from the original katakana input', async () => {
+    setInput('#q', 'ロミオ');
+    await flush(220);
+    const row = document.querySelector('#drop .di[data-action="selSong"][data-arg="77"]');
+    expect(row).toBeTruthy();
   });
 });
 
@@ -314,5 +362,353 @@ describe('manual song id', () => {
   it('clears the selection when the id field is emptied', () => {
     setInput('#song-id', '');
     expect(document.getElementById('sel-bar').classList.contains('show')).toBe(false);
+  });
+});
+
+describe('OCR candidates + device auto-pick', () => {
+  it('renders fuzzy OCR candidates and selecting one sets the song', async () => {
+    detectSongResp = {
+      matched: false,
+      candidates: [
+        { songId: 325, title: 'EXIST', score: 62 },
+        { songId: 999, title: '上海ハニー', score: 60 },
+      ],
+    };
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    const items = document.querySelectorAll('#det-cand .di');
+    expect(items.length).toBe(2);
+    expect(document.querySelector('#det-cand .di-title').textContent).toBe('EXIST');
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(true);
+    // i18n is still zh-TW from the language-switch test above.
+    expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.detect.candidates']);
+
+    items[0].click();
+    await flush();
+    expect(document.getElementById('song-id').value).toBe('325');
+    expect(document.getElementById('sb-id').textContent).toBe('#325');
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+  });
+
+  it('with >=2 candidates, clicking the second row selects that candidate (QA pick-coverage)', async () => {
+    detectSongResp = {
+      matched: false,
+      candidates: [
+        { songId: 325, title: 'EXIST', score: 62 },
+        { songId: 77, title: 'ロミオ', score: 60 },
+      ],
+    };
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    const items = document.querySelectorAll('#det-cand .di');
+    expect(items.length).toBe(2);
+    items[1].click(); // exercise the delegation for a non-first row
+    await flush();
+    expect(document.getElementById('song-id').value).toBe('77');
+    expect(document.getElementById('sb-title').textContent).toBe('ロミオ');
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+  });
+
+  it('submits an empty serial when the field is blank (backend auto-picks)', async () => {
+    setInput('#song-id', '325');
+    setInput('#dev-serial', '');
+    fetchCalls.length = 0;
+    click('[data-action="submitRun"]');
+    await flush();
+    const run = fetchCalls.find(([u]) => u.includes('/api/run'));
+    expect(run).toBeTruthy();
+    expect(JSON.parse(run[1].body).deviceSerial).toBe('');
+    expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.serial.autopick']);
+  });
+
+  it('auto-detect fills the serial, logs the saved device and refreshes the list', async () => {
+    detectAdbResp = { serial: 'TESTSERIAL', width: 1080, height: 2340, saved: 'added', seen: 1 };
+    fetchCalls.length = 0;
+    click('[data-action="autoDetectDevice"]');
+    await flush(); await flush();
+    expect(document.getElementById('dev-serial').value).toBe('TESTSERIAL');
+    expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.detect.devadded']);
+    expect(fetchCalls.some(([u]) => u.includes('/api/device'))).toBe(true); // loadDevices() re-ran
+  });
+
+  it('auto-detect aborts a hung backend after 20s and restores the placeholder (QA timeout path)', async () => {
+    vi.useFakeTimers();
+    try {
+      let seenSignal = null;
+      globalThis.fetch.mockImplementationOnce((url, init) => {
+        seenSignal = init && init.signal;
+        return new Promise((_resolve, reject) => {
+          if (seenSignal) seenSignal.addEventListener('abort', () => reject(new Error('aborted by test')));
+        });
+      });
+      const dsInput = document.getElementById('dev-serial');
+      click('[data-action="autoDetectDevice"]');
+      expect(dsInput.placeholder).toBe(zhTwLocale['log.detect.detecting']);
+      expect(seenSignal).toBeTruthy();
+      expect(seenSignal.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(20000);
+      await Promise.resolve(); await Promise.resolve();
+
+      expect(seenSignal.aborted).toBe(true);
+      expect(dsInput.placeholder).toBe(''); // "detecting…" must not stick forever
+      expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.detect.fail']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still guides to Settings when an unregistered serial is typed', async () => {
+    setInput('#dev-serial', 'UNKNOWN');
+    fetchCalls.length = 0;
+    click('[data-action="submitRun"]');
+    await flush();
+    expect(fetchCalls.some(([u]) => u.includes('/api/run'))).toBe(false);
+    expect(document.getElementById('pane-settings').classList.contains('active')).toBe(true);
+    expect(document.getElementById('song-log').textContent)
+      .toContain(zhTwLocale['log.serial.unconfigured.pre'] + 'UNKNOWN');
+  });
+});
+
+describe('OCR candidate picker lifecycle (QA edge cases)', () => {
+  const candResp = (candidates) => ({ matched: false, candidates });
+
+  it('closes the candidate list on Escape and on mode switch', async () => {
+    // Two candidates so the picker actually opens — a single candidate is
+    // auto-applied by design (see the single-candidate describe below).
+    detectSongResp = candResp([
+      { songId: 325, title: 'EXIST', score: 62 },
+      { songId: 999, title: '上海ハニー', score: 60 },
+    ]);
+    const dd = document.getElementById('det-cand');
+
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(dd.classList.contains('open')).toBe(true);
+
+    // Dispatch on an element (body), like a real keydown, so it bubbles to
+    // the document-level listeners with an Element target.
+    document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(dd.classList.contains('open')).toBe(false);
+
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(dd.classList.contains('open')).toBe(true);
+
+    click('[data-action="setMode"][data-arg="pjsk"]');
+    expect(dd.classList.contains('open')).toBe(false);
+    click('[data-action="setMode"][data-arg="bang"]'); // restore mode for later tests
+
+    // A click outside the .sw wrapper closes it as well.
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(dd.classList.contains('open')).toBe(true);
+    click('#nav-song'); // any element outside the candidate wrapper
+    expect(dd.classList.contains('open')).toBe(false);
+  });
+
+  it('logs the nomatch OCR text when the backend returns no candidates', async () => {
+    // First open the list (two candidates — a single one would auto-apply),
+    // then re-detect with an empty result: the picker must close and the
+    // nomatch log must appear.
+    detectSongResp = candResp([
+      { songId: 325, title: 'EXIST', score: 62 },
+      { songId: 999, title: '上海ハニー', score: 60 },
+    ]);
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(true);
+
+    detectSongResp = { matched: false, candidates: [], texts: ['noise A', 'noise B'] };
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+    const log = document.getElementById('song-log').textContent;
+    expect(log).toContain(zhTwLocale['log.detect.nomatch']);
+    expect(log).toContain('noise A / noise B');
+  });
+
+  it('a candidate click resolves id, selection bar and difficulty availability', async () => {
+    detectSongResp = candResp([
+      { songId: 325, title: 'EXIST', score: 84 },
+      { songId: 999, title: '上海ハニー', score: 60 },
+    ]);
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    const rows = document.querySelectorAll('#det-cand .di');
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain('84');
+
+    rows[0].click();
+    await flush();
+    expect(document.getElementById('song-id').value).toBe('325');
+    expect(document.getElementById('sb-id').textContent).toBe('#325');
+    expect(document.getElementById('sb-title').textContent).toBe('EXIST');
+    expect(document.getElementById('sel-bar').classList.contains('show')).toBe(true);
+    // Song 325 has difficulties 0-3: SPECIAL (4) disabled, EXPERT (3) available.
+    expect(document.querySelectorAll('.db')[4].classList.contains('dis')).toBe(true);
+    expect(document.querySelectorAll('.db')[3].classList.contains('dis')).toBe(false);
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+  });
+
+  it('auto-detect: updated logs and refreshes; empty result logs none and skips refresh', async () => {
+    detectAdbResp = { serial: 'TESTSERIAL', width: 1080, height: 2340, saved: 'updated', seen: 1 };
+    fetchCalls.length = 0;
+    click('[data-action="autoDetectDevice"]');
+    await flush(); await flush();
+    expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.detect.devupdated']);
+    expect(fetchCalls.some(([u]) => u.includes('/api/device'))).toBe(true); // loadDevices() re-ran
+
+    detectAdbResp = { serial: '', seen: 0 };
+    fetchCalls.length = 0;
+    click('[data-action="autoDetectDevice"]');
+    await flush(); await flush();
+    expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.detect.none']);
+    expect(document.getElementById('dev-serial').placeholder).toBe('');
+    expect(fetchCalls.some(([u]) => u.includes('/api/device'))).toBe(false); // nothing to refresh
+  });
+
+  it('blank serial with zero saved devices redirects to Settings with the required log', async () => {
+    // The next loadDevices() (triggered by nav) sees an empty device map.
+    globalThis.fetch.mockImplementationOnce(() => jsonResp({}));
+    click('#nav-settings');
+    await flush();
+
+    setInput('#song-id', '325');
+    setInput('#dev-serial', '');
+    fetchCalls.length = 0;
+    click('[data-action="submitRun"]');
+    await flush();
+    expect(fetchCalls.some(([u]) => u.includes('/api/run'))).toBe(false);
+    expect(document.getElementById('pane-settings').classList.contains('active')).toBe(true);
+    expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.serial.required']);
+    // The redirect itself re-runs loadDevices() with the normal mock, which
+    // restores the saved device list for the drawer test below.
+    await flush();
+  });
+
+  it('detect-song HTTP failure logs the error and leaves the picker closed', async () => {
+    globalThis.fetch.mockImplementationOnce(() =>
+      Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('kaboom') }));
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    const log = document.getElementById('song-log').textContent;
+    expect(log).toContain(zhTwLocale['log.detect.fail']);
+    expect(log).toContain('kaboom');
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+  });
+
+  it('a backend rejection of the empty-serial run surfaces guidance in the log', async () => {
+    setInput('#song-id', '325');
+    setInput('#dev-serial', '');
+    globalThis.fetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: false, status: 409, json: () => Promise.resolve({}),
+        text: () => Promise.resolve('no registered ADB device found; add one via Auto Detect or in Settings first'),
+      }));
+    click('[data-action="submitRun"]');
+    await flush();
+    const log = document.getElementById('song-log').textContent;
+    expect(log).toContain(zhTwLocale['log.serial.autopick']);
+    expect(log).toContain('no registered ADB device found');
+  });
+
+  it('typing in the search box closes a stale OCR candidate picker', async () => {
+    detectSongResp = candResp([
+      { songId: 325, title: 'EXIST', score: 62 },
+      { songId: 999, title: '上海ハニー', score: 60 },
+    ]);
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(true);
+
+    setInput('#q', 'exist');
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+    await flush(220); // let the debounced search settle
+  });
+});
+
+describe('OCR single-candidate auto-apply (bugfix: no 1-entry picker)', () => {
+  it('auto-applies the only candidate without opening the picker', async () => {
+    setInput('#song-id', ''); // reset so the sel-bar assertion below is meaningful
+    expect(document.getElementById('sel-bar').classList.contains('show')).toBe(false);
+
+    detectSongResp = {
+      matched: false,
+      candidates: [{ songId: 77, title: 'ロメオ', score: 62 }],
+      texts: ['ロメ才'],
+    };
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+
+    // The id lands in the field and the selection bar resolves via onManualId.
+    expect(document.getElementById('song-id').value).toBe('77');
+    expect(document.getElementById('sel-bar').classList.contains('show')).toBe(true);
+    expect(document.getElementById('sb-id').textContent).toBe('#77');
+    // No single-entry picker: the dropdown must stay closed.
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+    // i18n is still zh-TW from the language-switch test above.
+    const log = document.getElementById('song-log').textContent;
+    expect(log).toContain(zhTwLocale['log.detect.candone']);
+    expect(log).toContain('#77 ロメオ (62, OCR');
+  });
+
+  it('a single DB-known candidate also resolves the real title and difficulties', async () => {
+    detectSongResp = { matched: false, candidates: [{ songId: 325, title: 'EXIST', score: 71 }] };
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(document.getElementById('song-id').value).toBe('325');
+    expect(document.getElementById('sb-title').textContent).toBe('EXIST'); // real title, not "Manual input"
+    expect(document.querySelectorAll('.db')[4].classList.contains('dis')).toBe(true); // SPECIAL unavailable
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+  });
+
+  it('missing candidates field still logs nomatch and keeps the picker closed', async () => {
+    detectSongResp = { matched: false, texts: ['noise C'] }; // no candidates key at all
+    click('[data-action="detectSong"]');
+    await flush(); await flush();
+    expect(document.getElementById('det-cand').classList.contains('open')).toBe(false);
+    expect(document.getElementById('song-log').textContent).toContain(zhTwLocale['log.detect.nomatch']);
+  });
+});
+
+describe('regression smoke (search / device drawer / detPreview)', () => {
+  it('detPreview shows the top-3 fuzzy candidates when unmatched', async () => {
+    detectSongResp = {
+      matched: false,
+      candidates: [
+        { songId: 11, title: 'A1', score: 92 },
+        { songId: 12, title: 'A2', score: 84 },
+        { songId: 13, title: 'A3', score: 74 },
+        { songId: 14, title: 'A4', score: 60 },
+      ],
+      texts: ['ocr text'],
+    };
+    click('[data-action="detectPreview"]');
+    await flush(); await flush();
+    const info = document.getElementById('det-info').textContent;
+    expect(info).toContain('#11 A1 (92)');
+    expect(info).toContain('#13 A3 (74)');
+    expect(info).not.toContain('#14'); // only the top 3 are previewed
+    expect(info).toContain('ocr text');
+  });
+
+  it('device drawer still lists the saved devices', async () => {
+    document.getElementById('btn-dev-drop').click();
+    await flush();
+    const dd = document.getElementById('dev-drop');
+    expect(dd.classList.contains('open')).toBe(true);
+    expect(dd.querySelector('.di-id').textContent).toContain('TESTSERIAL');
+  });
+
+  it('song search dropdown still selects after the candidate flow', async () => {
+    setInput('#song-id', '');
+    setInput('#q', 'exist');
+    await flush(220);
+    const items = document.querySelectorAll('#drop .di');
+    expect(items.length).toBeGreaterThan(0);
+    items[0].click();
+    expect(document.getElementById('song-id').value).toBe('325');
+    expect(document.getElementById('sb-title').textContent).toBe('EXIST');
   });
 });
