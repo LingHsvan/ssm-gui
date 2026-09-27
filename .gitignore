@@ -17,3 +17,5 @@ gui/frontend/dist/
 /*.txt
 /scrcpy-server-*
 /*.dll
+
+build/
