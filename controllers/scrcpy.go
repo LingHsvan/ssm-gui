@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kvarenzn/ssm/adb"
@@ -40,6 +41,14 @@ type ScrcpyController struct {
 	frameMu     sync.RWMutex
 	latestFrame *ScrcpyFrame
 	frameFn     func(ScrcpyFrame)
+
+	// sendBroken flips once a control-socket write fails; afterwards Send
+	// drops input silently instead of warning on every remaining event.
+	sendBroken atomic.Bool
+
+	// sessionUp is true between a successful Open and Close; it lets the
+	// launcher goroutine tell "failed to start" apart from "died mid-session".
+	sessionUp atomic.Bool
 }
 
 // ScrcpyFrame is a compact grayscale-friendly frame snapshot for analyzers.
@@ -60,16 +69,29 @@ func NewScrcpyController(device *adb.Device) *ScrcpyController {
 	}
 }
 
-func tryListen(host string, port int) (net.Listener, int) {
-	for {
+const (
+	// scrcpyAcceptTimeout bounds how long Open waits for scrcpy-server to
+	// dial back after being launched. It only applies while the sockets are
+	// being accepted; once the session is live no deadline is ever armed.
+	scrcpyAcceptTimeout = 20 * time.Second
+	listenPortAttempts  = 32
+)
+
+// tryListen binds the first free TCP port at or above `port`. The search is
+// bounded so an unusable port range fails fast instead of spinning forever.
+func tryListen(host string, port int) (net.Listener, int, error) {
+	startPort := port
+	for i := 0; i < listenPortAttempts; i++ {
 		addr := fmt.Sprintf("%s:%d", host, port)
 		listen, err := net.Listen("tcp", addr)
 		if err == nil {
-			return listen, port
+			return listen, port, nil
 		}
 
 		port++
 	}
+
+	return nil, 0, fmt.Errorf("no free port on %s starting at %d", host, startPort)
 }
 
 func readFull(conn net.Conn, buf []byte) error {
@@ -77,16 +99,62 @@ func readFull(conn net.Conn, buf []byte) error {
 	return err
 }
 
+// acceptWithTimeout accepts one inbound connection from the listener, giving
+// up after `timeout` so a scrcpy-server that never dials back cannot block
+// Open forever.
+func acceptWithTimeout(listener net.Listener, timeout time.Duration) (net.Conn, error) {
+	if tl, ok := listener.(*net.TCPListener); ok {
+		_ = tl.SetDeadline(time.Now().Add(timeout))
+		defer tl.SetDeadline(time.Time{})
+		conn, err := tl.Accept()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return nil, fmt.Errorf("scrcpy-server did not connect within %v", timeout)
+			}
+			return nil, err
+		}
+		return conn, nil
+	}
+
+	// Fallback for listeners without deadlines: bound the wait from this
+	// side; the parked Accept goroutine ends when the caller closes the
+	// listener.
+	type acceptResult struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan acceptResult, 1)
+	go func() {
+		conn, err := listener.Accept()
+		ch <- acceptResult{conn, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.conn, r.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("scrcpy-server did not connect within %v", timeout)
+	}
+}
+
 const testFromPort = 27188
 
-func (c *ScrcpyController) Open(filepath string, version string) error {
-	listener, port := tryListen("localhost", testFromPort)
+func (c *ScrcpyController) Open(filepath string, version string) (err error) {
+	listener, port, err := tryListen("localhost", testFromPort)
+	if err != nil {
+		return err
+	}
 	c.listener = listener
+	// A failed Open must not leave a half-open controller behind: release
+	// the listener and any accepted sockets so retries cannot leak them.
+	defer func() {
+		if err != nil {
+			_ = c.Close()
+		}
+	}()
 	log.Debugf("Listening at localhost:%d", port)
 
 	localName := fmt.Sprintf("localabstract:scrcpy_%s", c.sessionID)
-	err := c.device.Forward(localName, fmt.Sprintf("tcp:%d", port), true, false)
-	if err != nil {
+	if err := c.device.Forward(localName, fmt.Sprintf("tcp:%d", port), true, false); err != nil {
 		return err
 	}
 	log.Debugf("ADB reverse socket `%s` created.", localName)
@@ -95,6 +163,7 @@ func (c *ScrcpyController) Open(filepath string, version string) error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
 	log.Debugln("`scrcpy-server` loaded.")
 
@@ -118,14 +187,26 @@ func (c *ScrcpyController) Open(filepath string, version string) error {
 			"video_bit_rate=100000",             // Use a very low bitrate to reduce video bandwidth usage
 		)
 		if err != nil {
-			log.Warnf("failed to start `scrcpy-server`: %v", err)
+			if c.sessionUp.Load() {
+				// The launcher shell must survive for the whole session: if it
+				// dies while the session is live, the device-side server is
+				// gone and input will stop. Make the reason loud.
+				log.Warnf("scrcpy-server launcher connection lost; the device session is dead: %v", err)
+			} else {
+				log.Warnf("failed to start `scrcpy-server`: %v", err)
+			}
+			return
+		}
+
+		if c.sessionUp.Load() {
+			log.Warnf("scrcpy-server exited while the session was still active; last output: %q", string(result))
 			return
 		}
 
 		log.Debugln(result)
 	}()
 
-	videoSocket, err := listener.Accept()
+	videoSocket, err := acceptWithTimeout(listener, scrcpyAcceptTimeout)
 	if err != nil {
 		return err
 	}
@@ -133,7 +214,7 @@ func (c *ScrcpyController) Open(filepath string, version string) error {
 
 	log.Debugln("Video socket accepted.")
 
-	controlSocket, err := listener.Accept()
+	controlSocket, err := acceptWithTimeout(listener, scrcpyAcceptTimeout)
 	if err != nil {
 		return err
 	}
@@ -199,8 +280,18 @@ func (c *ScrcpyController) Open(filepath string, version string) error {
 	}
 	c.height = int(binary.BigEndian.Uint32(buf))
 
+	// The live video/control sockets stay deadline-free on purpose: an idle
+	// timeout armed here used to cut off input mid-song. Do not add one.
+
+	// The listener has served its purpose (scrcpy-server connects exactly
+	// twice: video + control); close it now so a failed retry cannot leak
+	// the local port.
+	_ = c.listener.Close()
+	c.listener = nil
+
 	c.cRunning = true
 	c.vRunning = true
+	c.sessionUp.Store(true)
 
 	go func() {
 		msgTypeBuf := make([]byte, 1)
@@ -290,6 +381,7 @@ func (c *ScrcpyController) Up(pointerID uint64, x, y int) {
 func (c *ScrcpyController) Close() error {
 	c.cRunning = false
 	c.vRunning = false
+	c.sessionUp.Store(false)
 
 	// Close every resource even if an earlier one errors, so a failed
 	// videoSocket.Close() can no longer leak the control socket and listener.
@@ -300,15 +392,21 @@ func (c *ScrcpyController) Close() error {
 		}
 	}
 
-	keep(c.videoSocket.Close())
-	keep(c.controlSocket.Close())
+	if c.videoSocket != nil {
+		keep(c.videoSocket.Close())
+	}
+	if c.controlSocket != nil {
+		keep(c.controlSocket.Close())
+	}
 
 	if c.decoder != nil {
 		c.decoder.Drop()
 		c.decoder = nil
 	}
 
-	keep(c.listener.Close())
+	if c.listener != nil {
+		keep(c.listener.Close())
+	}
 	return firstErr
 }
 
@@ -395,20 +493,37 @@ func (c *ScrcpyController) Send(data []byte) {
 	// 	pid := binary.BigEndian.Uint64(chunk[2:])
 	// 	log.Debugf("[TOUCH] action=%d ptr=%d x=%d y=%d", action, pid, x, y)
 	// }
+	if c.sendBroken.Load() {
+		return
+	}
+
 	n, err := c.controlSocket.Write(data)
 	if err != nil {
-		log.Warnf("failed to send control data through control socket: %v", err)
+		if c.sendBroken.CompareAndSwap(false, true) {
+			// Warn once: a dead connection must not flood the console with
+			// an identical line for every remaining touch event.
+			log.Warnf("control connection lost; further input is disabled for this session: %v", err)
+		}
 		return
 	}
 
 	if n != len(data) {
-		log.Warnf("partial control data sent: expect %d bytes, sent %d bytes", len(data), n)
+		if c.sendBroken.CompareAndSwap(false, true) {
+			log.Warnf("partial control data sent: expect %d bytes, sent %d bytes", len(data), n)
+		}
 		return
 	}
 }
 
+// Broken reports whether the control connection has failed for good; a
+// playback loop can poll it to stop early instead of pushing events into a
+// dead socket.
+func (c *ScrcpyController) Broken() bool {
+	return c.sendBroken.Load()
+}
+
 func (c *ScrcpyController) ResetTouch() {
-	if c.controlSocket == nil {
+	if c.controlSocket == nil || c.sendBroken.Load() {
 		return
 	}
 	for i := 0; i < 10; i++ {
