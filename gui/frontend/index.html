@@ -338,6 +338,12 @@
             <span class="jitter-val !text-ssm-blue" id="val-slideReportInterval">10</span>
           </div>
           <div class="jitter-row">
+            <span class="jitter-label" data-i18n="settings.flickLead">Flick Lead (ms)</span>
+            <input type="range" id="sld-flickLead" min="0" max="60" step="1" value="0"
+              data-oninput="onAdvanced" data-arg="flickLead">
+            <span class="jitter-val !text-ssm-blue" id="val-flickLead">0</span>
+          </div>
+          <div class="jitter-row">
             <span class="jitter-label" data-i18n="settings.flickFactor">Flick Factor</span>
             <input type="range" id="sld-flickFactor" min="5" max="50" step="1" value="20"
               data-oninput="onAdvanced" data-arg="flickFactor">

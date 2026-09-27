@@ -88,6 +88,12 @@ type VTEGenerateConfig struct {
 	FlickReportInterval int64
 	SlideReportInterval int64
 
+	// FlickLeadMs emits the whole flick gesture this many ms early. The game
+	// only recognises a swipe once enough travel has accumulated, so a gesture
+	// drawn from the flick's exact note time always lands late; taps are
+	// unaffected. 0 disables the lead.
+	FlickLeadMs int64
+
 	//  Jitter settings
 	TimingJitter   int64   // Time jitter range (ms)
 	PositionJitter float64 // Position jitter

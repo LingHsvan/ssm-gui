@@ -76,6 +76,10 @@ type RunRequest struct {
 	SlideReportInterval int64   `json:"slideReportInterval"`
 	FlickFactor         float64 `json:"flickFactor"`
 	FlickPow            float64 `json:"flickPow"`
+	// FlickLeadMs advances the whole flick gesture by this many ms. Pointer so
+	// "absent" (keep the mode default) is distinguishable from an explicit 0
+	// (no lead): Our Notes defaults to 30 while bang/pjsk default to 0.
+	FlickLeadMs *int64 `json:"flickLeadMs"`
 }
 
 type Server struct {

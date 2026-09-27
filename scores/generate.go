@@ -409,7 +409,10 @@ func GenerateTouchEvent(config *VTEGenerateConfig, events []*star) (common.RawVi
 		case tapNote, dragNote:
 			nodes.AddEvent(id, ms, ms+config.TapDuration)
 		case flickNote, throwNote:
-			nodes.AddEvent(id, ms, ms+config.FlickDuration+config.FlickReportInterval)
+			// Reserve the pointer from the leaded start, so Colorize never hands
+			// out a pointer that is still busy when the flick actually begins.
+			start := max(ms-max(config.FlickLeadMs, 0), 0)
+			nodes.AddEvent(id, start, start+config.FlickDuration+config.FlickReportInterval)
 		case slideNote:
 			endMs := quantify(event.seconds)
 			if !event.isFlick() {
@@ -554,8 +557,12 @@ func GenerateTouchEvent(config *VTEGenerateConfig, events []*star) (common.RawVi
 			})
 			setPointerEnd(pointerID, ms+dur)
 		case throwNote, flickNote:
-			// Apply timing jitter
-			ms := jitterMs(quantify(event.seconds))
+			// Apply timing jitter, then lead the whole gesture so the swipe is
+			// recognised on the note's judgement instant rather than ~30ms later.
+			ms := jitterMs(quantify(event.seconds)) - config.FlickLeadMs
+			if ms < 0 {
+				ms = 0
+			}
 			ms = clampStartForPointer(pointerID, ms)
 			xs := event.track
 			if event.width > 1.0/6 && math.Abs(math.Cos(event.direction)) > 0.5 {
@@ -594,6 +601,13 @@ func GenerateTouchEvent(config *VTEGenerateConfig, events []*star) (common.RawVi
 					continue
 				}
 				nextMs := quantify(step.seconds)
+				// A slide that ends in a flick: arrive `FlickLeadMs` early so the
+				// swipe is recognised on the flick's judgement instant. Leading the
+				// arrival (instead of shifting the tail) keeps one monotonic
+				// gesture: the finger gets there early, then throws.
+				if step.isFlick() && step.isEnd() {
+					nextMs -= config.FlickLeadMs
+				}
 				if nextMs <= ms {
 					nextMs = ms + 1
 				}

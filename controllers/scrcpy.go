@@ -430,8 +430,13 @@ func (c *ScrcpyController) LatestFrame() (ScrcpyFrame, bool) {
 func (c *ScrcpyController) Preprocess(rawEvents common.RawVirtualEvents, turnRight bool, dc *config.DeviceConfig, calc stage.JudgeLinePositionCalculator) []common.ViscousEventItem {
 	width, height := float64(dc.Height), float64(dc.Width)
 	x1, x2, yy := calc(width, height)
+	// A flick's travel must not depend on its direction: scale BOTH axes by the
+	// lane width (the HID backend already does this). The previous
+	// `yy - height/2` vertical scale made upward flicks about 5x weaker than
+	// sideways ones, which the game frequently failed to register.
+	dx := x2 - x1
 	mapper := func(x, y float64) (int, int) {
-		return int(math.Round(x1 + (x2-x1)*x)), int(math.Round(yy - (yy-height/2)*y))
+		return int(math.Round(x1 + dx*x)), int(math.Round(yy - dx*y))
 	}
 
 	result := []common.ViscousEventItem{}

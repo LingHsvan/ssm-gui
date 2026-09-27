@@ -42,6 +42,7 @@
   "settings.flickDuration": "フリック合計時間 (ms)",
   "settings.flickReportInterval": "フリック報告間隔 (ms)",
   "settings.slideReportInterval": "スライド報告間隔 (ms)",
+  "settings.flickLead": "フリック先行量 (ms)",
   "settings.flickFactor": "フリック距離倍率",
   "settings.flickPow": "フリック加速曲線指数",
   "settings.defaults": "デフォルトに戻す",

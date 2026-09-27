@@ -196,6 +196,11 @@ func runGUI(conf *config.Config) {
 			if req.FlickPow > 0 {
 				genConfig.FlickPow = req.FlickPow
 			}
+			// Unlike the sliders above, 0 is a meaningful value here (no lead),
+			// so this one is a pointer: nil keeps the mode's default.
+			if req.FlickLeadMs != nil {
+				genConfig.FlickLeadMs = max(*req.FlickLeadMs, 0)
+			}
 			rawEvents, greatApplied := scores.GenerateTouchEvent(genConfig, chart)
 			srv.SetGreatStats(req.GreatCount, int64(greatApplied))
 
@@ -688,11 +693,12 @@ func extractAssetFilter(p string) bool {
 // game mode. Callers (GUI / CLI) layer their own jitter/advanced overrides on
 // top, so the defaults live in exactly one place.
 //
-// Our Notes currently shares the BanG defaults. Note that its lane narrows
-// towards the top of the screen, so a flick's upward travel also shifts the
-// finger's effective lane: at FlickFactor = 1/5 that drift is ~0.7 half-lanes,
-// still inside one physical lane but close to the limit. If flicks get
-// misjudged as a neighbouring lane, lower FlickFactor (e.g. 1/8).
+// Our Notes shares BanG's tap/flick shape but reaches further (1/4 is about one
+// size-6 note width) and leads the whole gesture by 30ms: the game only
+// recognises a swipe once enough travel has accumulated, so a flick drawn from
+// its exact note time lands late. Its lane narrows towards the top of the
+// screen, so a long upward travel can shift the finger's effective lane; if
+// flicks get misjudged as a neighbouring lane, lower FlickFactor (e.g. 1/5).
 func newDefaultVTEConfig(mode string) *scores.VTEGenerateConfig {
 	c := &scores.VTEGenerateConfig{
 		TapDuration:         10,
@@ -705,6 +711,10 @@ func newDefaultVTEConfig(mode string) *scores.VTEGenerateConfig {
 	if mode == common.ModePjsk {
 		c.FlickFactor = 1.0 / 6
 		c.FlickDuration = 20
+	}
+	if mode == common.ModeOurNotes {
+		c.FlickFactor = 1.0 / 4
+		c.FlickLeadMs = 30
 	}
 	return c
 }

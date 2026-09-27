@@ -42,6 +42,7 @@
   "settings.flickDuration": "Flick 总时长 (ms)",
   "settings.flickReportInterval": "Flick 回报间隔 (ms)",
   "settings.slideReportInterval": "Slide 回报间隔 (ms)",
+  "settings.flickLead": "Flick 提前量 (ms)",
   "settings.flickFactor": "Flick 距离倍率",
   "settings.flickPow": "Flick 加速曲线指数",
   "settings.defaults": "重置为默认值",

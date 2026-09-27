@@ -156,6 +156,20 @@ describe('song setup controls', () => {
     expect(document.querySelectorAll('.db')[4].style.display).not.toBe('none');
   });
 
+  it('applies per-mode flick defaults, including the Our Notes lead', () => {
+    click('[data-action="setMode"][data-arg="ournotes"]');
+    expect(document.getElementById('sld-flickFactor').value).toBe('25');
+    expect(document.getElementById('sld-flickLead').value).toBe('30');
+
+    click('[data-action="setMode"][data-arg="pjsk"]');
+    expect(document.getElementById('sld-flickFactor').value).toBe('17');
+    expect(document.getElementById('sld-flickLead').value).toBe('0');
+
+    click('[data-action="setMode"][data-arg="bang"]');
+    expect(document.getElementById('sld-flickFactor').value).toBe('20');
+    expect(document.getElementById('sld-flickLead').value).toBe('0');
+  });
+
   it('switches backend and shows the HID warning only for HID', () => {
     click('[data-action="setBackend"][data-arg="hid"]');
     expect(document.getElementById('hid-warn-box').classList.contains('hidden')).toBe(false);
@@ -190,6 +204,8 @@ describe('humanization + advanced sliders', () => {
     expect(document.getElementById('val-flickFactor').textContent).toBe('0.25');
     setInput('#sld-flickPow', '15');
     expect(document.getElementById('val-flickPow').textContent).toBe('1.5');
+    setInput('#sld-flickLead', '30');
+    expect(document.getElementById('val-flickLead').textContent).toBe('30');
   });
 });
 
@@ -310,6 +326,7 @@ describe('API actions', () => {
     const body = JSON.parse(run[1].body);
     expect(body.songId).toBe(325);
     expect(body.deviceSerial).toBe('TESTSERIAL');
+    expect(typeof body.flickLeadMs).toBe('number');
   });
 
   it('saves and deletes a device', async () => {

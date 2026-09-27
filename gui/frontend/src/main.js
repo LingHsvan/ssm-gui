@@ -297,10 +297,13 @@ function setMode(m) {
   });
 
   if (m === 'pjsk') {
-    ADV_DEFAULTS.flickDuration = 20; ADV_DEFAULTS.flickFactor = 17;
+    ADV_DEFAULTS.flickDuration = 20; ADV_DEFAULTS.flickFactor = 17; ADV_DEFAULTS.flickLead = 0;
   } else {
-    // bang and ournotes share the same flick defaults
-    ADV_DEFAULTS.flickDuration = 60; ADV_DEFAULTS.flickFactor = 20;
+    // bang keeps the original defaults; Our Notes reaches further and leads the
+    // whole gesture, because the game only registers a swipe once it has moved.
+    ADV_DEFAULTS.flickDuration = 60;
+    ADV_DEFAULTS.flickFactor = m === 'ournotes' ? 25 : 20;
+    ADV_DEFAULTS.flickLead = m === 'ournotes' ? 30 : 0;
     if (S.diff > maxDiffIndex()) S.diff = 3;
   }
   updateDiffLabels();
@@ -946,7 +949,7 @@ function submitRun() {
   const grOffsetRaw = parseInt(document.getElementById('sld-grOffset').value) || 10;
   const grCountRaw = getGreatCountRaw();
   const adv = getAdvancedValues();
-  const body = { mode: S.mode, backend: S.backend, diff: diffName(S.diff), orient: S.orient, songId: sid, chartPath: cp, deviceSerial: ds, nowPlaying: buildNowPlaying(), timingJitter: tRaw, positionJitter: jitterRealValue('position', pRaw), tapDurJitter: dRaw, greatOffsetMs: grOffsetRaw, greatCount: grCountRaw, tapDuration: adv.tapDuration, flickDuration: adv.flickDuration, flickReportInterval: adv.flickReportInterval, slideReportInterval: adv.slideReportInterval, flickFactor: adv.flickFactor, flickPow: adv.flickPow };
+  const body = { mode: S.mode, backend: S.backend, diff: diffName(S.diff), orient: S.orient, songId: sid, chartPath: cp, deviceSerial: ds, nowPlaying: buildNowPlaying(), timingJitter: tRaw, positionJitter: jitterRealValue('position', pRaw), tapDurJitter: dRaw, greatOffsetMs: grOffsetRaw, greatCount: grCountRaw, tapDuration: adv.tapDuration, flickDuration: adv.flickDuration, flickReportInterval: adv.flickReportInterval, slideReportInterval: adv.slideReportInterval, flickFactor: adv.flickFactor, flickPow: adv.flickPow, flickLeadMs: adv.flickLead };
   log('song-log', t('log.loading'), 'info');
   fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(function (r) { if (r.ok) { log('song-log', t('log.sent'), 'ok'); nav('play'); } else r.text().then(function (tx) { log('song-log', t('log.fail') + tx, 'err'); }); })
@@ -1199,7 +1202,7 @@ function autoDetectDevice() {
 
 
 // ══ advanced VTE params ════════════════════════════════════
-const ADV_DEFAULTS = { tapDuration: 10, flickDuration: 60, flickReportInterval: 5, slideReportInterval: 10, flickFactor: 20, flickPow: 10 };
+const ADV_DEFAULTS = { tapDuration: 10, flickDuration: 60, flickReportInterval: 5, slideReportInterval: 10, flickFactor: 20, flickPow: 10, flickLead: 0 };
 function onAdvanced(key) {
   const raw = parseInt(document.getElementById('sld-' + key).value);
   const el = document.getElementById('val-' + key);
@@ -1229,6 +1232,7 @@ function getAdvancedValues() {
     slideReportInterval: parseInt(document.getElementById('sld-slideReportInterval').value) || 10,
     flickFactor: (parseInt(document.getElementById('sld-flickFactor').value) || 20) / 100,
     flickPow: (parseInt(document.getElementById('sld-flickPow').value) || 10) / 10,
+    flickLead: parseInt(document.getElementById('sld-flickLead').value) || 0,
   };
 }
 // ══ extraction ═════════════════════════════════════════════

@@ -42,6 +42,7 @@
   "settings.flickDuration": "Flick Duration (ms)",
   "settings.flickReportInterval": "Flick Report Interval (ms)",
   "settings.slideReportInterval": "Slide Report Interval (ms)",
+  "settings.flickLead": "Flick Lead (ms)",
   "settings.flickFactor": "Flick Factor",
   "settings.flickPow": "Flick Curve Exponent",
   "settings.defaults": "Reset to Defaults",
