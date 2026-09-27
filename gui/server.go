@@ -25,6 +25,7 @@ import (
 	"github.com/kvarenzn/ssm/common"
 	"github.com/kvarenzn/ssm/config"
 	"github.com/kvarenzn/ssm/controllers"
+	"github.com/kvarenzn/ssm/db"
 	"github.com/kvarenzn/ssm/log"
 )
 
@@ -351,25 +352,24 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSongDB(w http.ResponseWriter, r *http.Request) {
-	mode := r.URL.Query().Get("mode")
-	if mode != "pjsk" {
-		mode = "bang"
-	}
+	mode := common.NormalizeMode(r.URL.Query().Get("mode"))
 	w.Header().Set("Content-Type", "application/json")
 
-	if mode == "bang" {
-		songs, err := loadLocalFirst("./all.5.json", "https://bestdori.com/api/songs/all.5.json")
+	switch mode {
+	case common.ModeOurNotes:
+		notesDB, err := db.NewOurNotesDB()
 		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
+			http.Error(w, `{"error":"ournotes database: `+err.Error()+`"}`, http.StatusBadGateway)
 			return
 		}
-		bands, err := loadLocalFirst("./all.1.json", "https://bestdori.com/api/bands/all.1.json")
+		payload, err := notesDB.Payload()
 		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
+			http.Error(w, `{"error":"ournotes payload: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprintf(w, `{"songs":%s,"bands":%s}`, songs, bands)
-	} else {
+		w.Write(payload)
+
+	case common.ModePjsk:
 		const sekaiMusicsURL = "https://raw.githubusercontent.com/Sekai-World/sekai-master-db-diff/main/musics.json"
 		const sekaiMusicDifficultiesURL = "https://raw.githubusercontent.com/Sekai-World/sekai-master-db-diff/main/musicDifficulties.json"
 		const sekaiMusicArtistsURL = "https://raw.githubusercontent.com/Sekai-World/sekai-master-db-diff/main/musicArtists.json"
@@ -390,7 +390,57 @@ func (s *Server) handleSongDB(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fmt.Fprintf(w, `{"songs":%s,"songsJp":%s,"bands":{},"artists":%s,"musicDifficulties":%s}`, songs, songs, artists, difficulties)
+
+	default: // common.ModeBang
+		songs, err := loadLocalFirst("./all.5.json", "https://bestdori.com/api/songs/all.5.json")
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
+			return
+		}
+		bands, err := loadLocalFirst("./all.1.json", "https://bestdori.com/api/bands/all.1.json")
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
+			return
+		}
+		fmt.Fprintf(w, `{"songs":%s,"bands":%s}`, songs, bands)
 	}
+}
+
+// handleOurNotesJacket serves a locally unpacked Our Notes jacket image:
+//
+//	GET /api/ournotes-jacket?id=<songId>&size=full|thumb
+//
+// Requests for an unknown song (or a song without artwork) fall back to the
+// placeholder jacket so the UI always has an image to show.
+func (s *Server) handleOurNotesJacket(w http.ResponseWriter, r *http.Request) {
+	var id int
+	fmt.Sscanf(r.URL.Query().Get("id"), "%d", &id)
+	thumb := r.URL.Query().Get("size") == "thumb"
+
+	file := ""
+	if notesDB, err := db.NewOurNotesDB(); err == nil {
+		if p, ok := notesDB.JacketPath(id, thumb); ok {
+			file = p
+		}
+	}
+	if file == "" || !fileExists(file) {
+		file = filepath.Join(db.OurNotesDir, "jackets", "jacket_temporary.png")
+		if thumb {
+			file = filepath.Join(db.OurNotesDir, "jackets", "small", "jacket_temporary.png")
+		}
+	}
+	if !fileExists(file) {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, file)
+}
+
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
 }
 
 func fetchOrLoad(localPath, url string) ([]byte, error) {
@@ -766,6 +816,7 @@ func (s *Server) Start() (string, error) {
 	mux.HandleFunc("/api/device", s.handleDevice)
 	mux.HandleFunc("/api/extract", s.handleExtract)
 	mux.HandleFunc("/api/songdb", s.handleSongDB)
+	mux.HandleFunc("/api/ournotes-jacket", s.handleOurNotesJacket)
 	mux.HandleFunc("/api/kill-adb", s.handleKillAdb)
 	mux.HandleFunc("/api/detect-adb", s.handleDetectAdb)
 	mux.HandleFunc("/api/detect-song", s.handleDetectSong)

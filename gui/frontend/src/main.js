@@ -216,29 +216,43 @@ function onGreatCountInput() { renderJitter('grCount'); }
 const S = { backend: 'adb', diff: 3, orient: 'left', mode: 'bang', state: 0, offset: 0, songId: 0, songData: null, db: null, dropIdx: -1, _lastLogState: -1, _lastGreatSig: '' };
 const DN_BANG = ['easy', 'normal', 'hard', 'expert', 'special'];
 const DN_PJSK = ['easy', 'normal', 'hard', 'expert', 'master', 'append'];
+const DN_OURNOTES = ['easy', 'normal', 'hard', 'expert'];
 const DL_BANG = ['EASY', 'NORMAL', 'HARD', 'EXPERT', 'SPECIAL'];
 const DL_PJSK = ['EASY', 'NORMAL', 'HARD', 'EXPERT', 'MASTER', 'APPEND'];
+const DL_OURNOTES = ['EASY', 'NORMAL', 'HARD', 'EXPERT'];
 const DOT_CLS = { 1: 'ready', 2: 'playing', 3: 'done', 4: 'error' };
 const STATE_MAP = { 0: 'state.idle', 1: 'state.ready.full', 2: 'state.playing.full', 3: 'state.done.full', 4: 'state.error.full' };
 const DIFF_COLORS = { easy: '#5ba3e0', normal: '#7ab84a', hard: '#d4921e', expert: '#e06060', special: '#9b95e0', append: '#4f8ff7' };
 
 function diffName(i) {
-  const dn = S.mode === 'pjsk' ? DN_PJSK : DN_BANG;
+  const dn = S.mode === 'pjsk' ? DN_PJSK : (S.mode === 'ournotes' ? DN_OURNOTES : DN_BANG);
   return dn[i] || dn[3];
 }
 
 function diffLabel(i) {
-  const dl = S.mode === 'pjsk' ? DL_PJSK : DL_BANG;
+  const dl = S.mode === 'pjsk' ? DL_PJSK : (S.mode === 'ournotes' ? DL_OURNOTES : DL_BANG);
   return dl[i] || dl[3];
+}
+
+// Highest difficulty index the current mode exposes:
+// bang 4 (SPECIAL), pjsk 5 (APPEND), ournotes 3 (EXPERT).
+function maxDiffIndex() {
+  if (S.mode === 'pjsk') return 5;
+  if (S.mode === 'ournotes') return 3;
+  return 4;
 }
 
 function updateDiffLabels() {
   const btns = document.querySelectorAll('.db');
   if (!btns || !btns.length) return;
-  if (btns[4]) btns[4].textContent = diffLabel(4);
+  const maxIdx = maxDiffIndex();
+  if (btns[4]) {
+    btns[4].textContent = diffLabel(4);
+    btns[4].style.display = maxIdx >= 4 ? '' : 'none';
+  }
   if (btns[5]) {
     btns[5].textContent = diffLabel(5);
-    btns[5].style.display = S.mode === 'pjsk' ? '' : 'none';
+    btns[5].style.display = maxIdx >= 5 ? '' : 'none';
   }
 }
 
@@ -278,17 +292,19 @@ function setMode(m) {
   closeDetCand();
 
   // Update active state on the mode buttons.
-  ['bang', 'pjsk'].forEach(function (x) {
+  ['bang', 'pjsk', 'ournotes'].forEach(function (x) {
     document.getElementById('mode-' + x).classList.toggle('active', x === m);
   });
 
   if (m === 'pjsk') {
     ADV_DEFAULTS.flickDuration = 20; ADV_DEFAULTS.flickFactor = 17;
   } else {
+    // bang and ournotes share the same flick defaults
     ADV_DEFAULTS.flickDuration = 60; ADV_DEFAULTS.flickFactor = 20;
-    if (S.diff === 5) S.diff = 3;
+    if (S.diff > maxDiffIndex()) S.diff = 3;
   }
   updateDiffLabels();
+  setDiff(S.diff);
   resetAdvanced();
 }
 function setBackend(b) {
@@ -854,6 +870,13 @@ function buildNowPlaying() {
         'https://assets.pjsek.ai/file/pjsekai-assets/startapp/music/jacket/' + bundle + '/' + bundle + '.png'
       ];
       np.jacketUrl = np.jacketUrls[0];
+    } else if (S.mode === 'ournotes') {
+      // Jackets are served locally from the unpacked assets.
+      if (S.songId) {
+        np.jacketUrls = ['/api/ournotes-jacket?id=' + S.songId,
+          '/api/ournotes-jacket?id=' + S.songId + '&size=thumb'];
+        np.jacketUrl = np.jacketUrls[0];
+      }
     } else if (ji && ji[0]) {
       const n = Math.ceil(S.songId / 10) * 10 || 10;
       np.jacketUrl = 'https://bestdori.com/assets/jp/musicjacket/musicjacket' + n + '_rip/assets-star-forassetbundle-startapp-musicjacket-musicjacket' + n + '-' + ji[0] + '-jacket.png';

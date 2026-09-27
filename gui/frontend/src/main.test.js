@@ -135,6 +135,27 @@ describe('song setup controls', () => {
     expect(document.querySelectorAll('.db')[5].style.display).toBe('none');
   });
 
+  it('switches to Our Notes and hides the SPECIAL and APPEND difficulties', () => {
+    click('[data-action="setMode"][data-arg="ournotes"]');
+    expect(document.getElementById('mode-ournotes').classList.contains('active')).toBe(true);
+    expect(document.getElementById('mode-bang').classList.contains('active')).toBe(false);
+    expect(document.getElementById('mode-pjsk').classList.contains('active')).toBe(false);
+
+    const btns = document.querySelectorAll('.db');
+    expect(btns[3].style.display).not.toBe('none');
+    expect(btns[4].style.display).toBe('none'); // no SPECIAL
+    expect(btns[5].style.display).toBe('none'); // no APPEND
+
+    // the selected difficulty falls back into the supported range
+    const activeIdx = [...document.querySelectorAll('.db')].findIndex((b) => b.classList.contains('active'));
+    expect(activeIdx).toBeGreaterThanOrEqual(0);
+    expect(activeIdx).toBeLessThanOrEqual(3);
+
+    click('[data-action="setMode"][data-arg="bang"]');
+    expect(document.getElementById('mode-ournotes').classList.contains('active')).toBe(false);
+    expect(document.querySelectorAll('.db')[4].style.display).not.toBe('none');
+  });
+
   it('switches backend and shows the HID warning only for HID', () => {
     click('[data-action="setBackend"][data-arg="hid"]');
     expect(document.getElementById('hid-warn-box').classList.contains('hidden')).toBe(false);

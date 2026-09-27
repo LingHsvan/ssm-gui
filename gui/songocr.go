@@ -21,8 +21,10 @@ import (
 	ocr "github.com/getcharzp/go-ocr"
 
 	"github.com/kvarenzn/ssm/adb"
+	"github.com/kvarenzn/ssm/common"
 	"github.com/kvarenzn/ssm/config"
 	"github.com/kvarenzn/ssm/controllers"
+	"github.com/kvarenzn/ssm/db"
 	"github.com/kvarenzn/ssm/log"
 	"github.com/kvarenzn/ssm/songmatch"
 )
@@ -173,13 +175,27 @@ func loadLocalFirst(localPath, url string) ([]byte, error) {
 }
 
 func loadSongCandidates(mode string) ([]songCandidate, error) {
+	mode = common.NormalizeMode(mode)
+
 	candMu.Lock()
 	defer candMu.Unlock()
 	if c, ok := candCache[mode]; ok {
 		return c, nil
 	}
 	var out []songCandidate
-	if strings.EqualFold(mode, "pjsk") {
+	switch mode {
+	case common.ModeOurNotes:
+		notesDB, err := db.NewOurNotesDB()
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range notesDB.Songs() {
+			titles := uniqueNonEmpty([]string{s.Title, s.Phonetic})
+			if s.ID > 0 && len(titles) > 0 {
+				out = append(out, songCandidate{SongID: s.ID, Titles: titles})
+			}
+		}
+	case common.ModePjsk:
 		data, err := loadLocalFirst("./sekai_master_db_diff_musics.json",
 			"https://raw.githubusercontent.com/Sekai-World/sekai-master-db-diff/main/musics.json")
 		if err != nil {
@@ -199,7 +215,7 @@ func loadSongCandidates(mode string) ([]songCandidate, error) {
 				out = append(out, songCandidate{SongID: s.ID, Titles: titles})
 			}
 		}
-	} else {
+	default: // common.ModeBang
 		data, err := loadLocalFirst("./all.5.json", "https://bestdori.com/api/songs/all.5.json")
 		if err != nil {
 			return nil, err
@@ -253,8 +269,9 @@ func uniqueNonEmpty(in []string) []string {
 // ─────────────────────────────────────────────────────────────
 
 var defaultSongROI = map[string][4]float64{
-	"bang": {0.28, 0.05, 0.45, 0.18},
-	"pjsk": {0.28, 0.05, 0.45, 0.18},
+	"bang":     {0.28, 0.05, 0.45, 0.18},
+	"pjsk":     {0.28, 0.05, 0.45, 0.18},
+	"ournotes": {0.28, 0.05, 0.45, 0.18}, // unverified; calibrate via Detect Song
 }
 
 func parseROIParam(s string) ([4]float64, bool) {
@@ -276,10 +293,7 @@ func parseROIParam(s string) ([4]float64, bool) {
 
 func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	mode := q.Get("mode")
-	if mode != "pjsk" {
-		mode = "bang"
-	}
+	mode := common.NormalizeMode(q.Get("mode"))
 	debug := q.Get("debug") == "1"
 	threshold := 0
 	fmt.Sscanf(q.Get("threshold"), "%d", &threshold)

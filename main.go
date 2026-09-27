@@ -49,8 +49,12 @@ var (
 	deviceSerial string
 	showDebugLog bool
 	showVersion  bool
-	pjskMode     bool
+	pjskFlag     bool
 )
+
+// gameMode is the active game mode (common.ModeBang / ModePjsk / ModeOurNotes).
+// The GUI sets it from the run request; the CLI sets it from -k.
+var gameMode = common.ModeBang
 
 var (
 	guiMode bool
@@ -113,12 +117,12 @@ func runGUI(conf *config.Config) {
 			direction = req.Orient
 			chartPath = req.ChartPath
 			deviceSerial = req.DeviceSerial
-			pjskMode = req.Mode == "pjsk"
+			gameMode = common.NormalizeMode(req.Mode)
 
 			var chartText []byte
 			var err error
 			if chartPath == "" {
-				pathResults, globErr := findMusicscorePath(pjskMode, songID, difficulty)
+				pathResults, globErr := findMusicscorePath(gameMode, songID, difficulty)
 				if globErr != nil || len(pathResults) < 1 {
 					srv.SetError("Musicscore not found. Please extract assets first or use a custom chart path.")
 					return
@@ -133,17 +137,26 @@ func runGUI(conf *config.Config) {
 			}
 
 			var chart scores.Chart
-			if pjskMode {
+			switch gameMode {
+			case common.ModePjsk:
 				chart, err = scores.ParseSUS(string(chartText))
 				if err != nil {
 					srv.SetError("Failed to parse SUS: " + err.Error())
 					return
 				}
-			} else {
+			case common.ModeOurNotes:
+				// Our Notes charts are gzip-compressed JSON; the parser also
+				// accepts an already-decoded file.
+				chart, err = scores.ParseOurNotes(chartText)
+				if err != nil {
+					srv.SetError("Failed to parse Our Notes chart: " + err.Error())
+					return
+				}
+			default:
 				chart = scores.ParseBMS(string(chartText))
 			}
 
-			genConfig := newDefaultVTEConfig(pjskMode)
+			genConfig := newDefaultVTEConfig(gameMode)
 			genConfig.TimingJitter = req.TimingJitter
 			genConfig.PositionJitter = req.PositionJitter
 			genConfig.TapDurJitter = req.TapDurJitter
@@ -461,12 +474,12 @@ func (t *tui) pcenterln(s string) {
 func displayDifficulty() string {
 	switch difficulty {
 	case "easy":
-		if pjskMode {
+		if gameMode == common.ModePjsk {
 			return "\x1b[0;42m EASY \x1b[0m "
 		}
 		return "\x1b[0;44m EASY \x1b[0m "
 	case "normal":
-		if pjskMode {
+		if gameMode == common.ModePjsk {
 			return "\x1b[0;44m NORMAL \x1b[0m "
 		}
 		return "\x1b[0;42m NORMAL \x1b[0m "
@@ -615,21 +628,37 @@ func (t *tui) autoplay() {
 }
 
 func getJudgeLineCalculator() stage.JudgeLinePositionCalculator {
-	if pjskMode {
+	switch gameMode {
+	case common.ModePjsk:
 		return stage.PJSKJudgeLinePos
+	case common.ModeOurNotes:
+		return stage.OurNotesJudgeLinePos
+	default:
+		return stage.BanGJudgeLinePos
 	}
-	return stage.BanGJudgeLinePos
 }
 
-// findMusicscorePath returns the chart .txt files matching a song id and
-// difficulty under the extracted assets directory for the given game mode.
-func findMusicscorePath(pjsk bool, songID int, difficulty string) ([]string, error) {
-	if pjsk {
+// findMusicscorePath returns the chart file matching a song id and difficulty
+// under the extracted assets directory for the given game mode.
+func findMusicscorePath(mode string, songID int, difficulty string) ([]string, error) {
+	switch mode {
+	case common.ModePjsk:
 		return filepath.Glob(filepath.Join("./assets/sekai/assetbundle/resources/startapp/music/music_score/",
 			fmt.Sprintf("%04d_01/%s.txt", songID, difficulty)))
+	case common.ModeOurNotes:
+		d, err := db.NewOurNotesDB()
+		if err != nil {
+			return nil, err
+		}
+		path, ok := d.ChartPath(songID, difficulty)
+		if !ok {
+			return nil, nil
+		}
+		return []string{path}, nil
+	default:
+		return filepath.Glob(filepath.Join("./assets/star/forassetbundle/startapp/musicscore/",
+			fmt.Sprintf("musicscore*/%03d/*_%s.txt", songID, difficulty)))
 	}
-	return filepath.Glob(filepath.Join("./assets/star/forassetbundle/startapp/musicscore/",
-		fmt.Sprintf("musicscore*/%03d/*_%s.txt", songID, difficulty)))
 }
 
 // extractAssetFilter selects which asset-bundle paths Extract should unpack:
@@ -658,7 +687,13 @@ func extractAssetFilter(p string) bool {
 // newDefaultVTEConfig returns the baseline touch-event generation config for a
 // game mode. Callers (GUI / CLI) layer their own jitter/advanced overrides on
 // top, so the defaults live in exactly one place.
-func newDefaultVTEConfig(pjsk bool) *scores.VTEGenerateConfig {
+//
+// Our Notes currently shares the BanG defaults. Note that its lane narrows
+// towards the top of the screen, so a flick's upward travel also shifts the
+// finger's effective lane: at FlickFactor = 1/5 that drift is ~0.7 half-lanes,
+// still inside one physical lane but close to the limit. If flicks get
+// misjudged as a neighbouring lane, lower FlickFactor (e.g. 1/8).
+func newDefaultVTEConfig(mode string) *scores.VTEGenerateConfig {
 	c := &scores.VTEGenerateConfig{
 		TapDuration:         10,
 		FlickDuration:       60,
@@ -667,7 +702,7 @@ func newDefaultVTEConfig(pjsk bool) *scores.VTEGenerateConfig {
 		FlickPow:            1,
 		SlideReportInterval: 10,
 	}
-	if pjsk {
+	if mode == common.ModePjsk {
 		c.FlickFactor = 1.0 / 6
 		c.FlickDuration = 20
 	}
@@ -789,7 +824,7 @@ func main() {
 	flag.StringVar(&direction, "r", "left", p.Sprintf("usage.r"))
 	flag.StringVar(&chartPath, "p", "", p.Sprintf("usage.p"))
 	flag.StringVar(&deviceSerial, "s", "", p.Sprintf("usage.s"))
-	flag.BoolVar(&pjskMode, "k", false, p.Sprintf("usage.k"))
+	flag.BoolVar(&pjskFlag, "k", false, p.Sprintf("usage.k"))
 	flag.BoolVar(&showDebugLog, "g", false, p.Sprintf("usage.g"))
 	flag.BoolVar(&showVersion, "v", false, p.Sprintf("usage.v"))
 
@@ -797,6 +832,10 @@ func main() {
 	flag.IntVar(&guiPort, "port", 8765, "Port used by the GUI (default 8765)")
 
 	flag.Parse()
+	// -k is the only CLI mode switch; Our Notes is GUI-only for now.
+	if pjskFlag {
+		gameMode = common.ModePjsk
+	}
 	// If no arguments are provided, enable GUI mode by default.
 	if len(os.Args) == 1 {
 		guiMode = true
@@ -837,7 +876,7 @@ func main() {
 
 	var database db.MusicDatabase
 	var err error
-	if pjskMode {
+	if gameMode == common.ModePjsk {
 		database, err = db.NewSekaiDB()
 	} else {
 		database, err = db.NewBestdoriDB()
@@ -864,7 +903,7 @@ func main() {
 
 	var chartText []byte
 	if chartPath == "" {
-		pathResults, globErr := findMusicscorePath(pjskMode, songID, difficulty)
+		pathResults, globErr := findMusicscorePath(gameMode, songID, difficulty)
 		if globErr != nil {
 			log.Die("Failed to find musicscore file:", globErr)
 		}
@@ -882,16 +921,22 @@ func main() {
 	}
 
 	var chart scores.Chart
-	if pjskMode {
+	switch gameMode {
+	case common.ModePjsk:
 		chart, err = scores.ParseSUS(string(chartText))
 		if err != nil {
 			log.Die("Failed to parse musicscore:", err)
 		}
-	} else {
+	case common.ModeOurNotes:
+		chart, err = scores.ParseOurNotes(chartText)
+		if err != nil {
+			log.Die("Failed to parse musicscore:", err)
+		}
+	default:
 		chart = scores.ParseBMS(string(chartText))
 	}
 
-	rawEvents, _ := scores.GenerateTouchEvent(newDefaultVTEConfig(pjskMode), chart)
+	rawEvents, _ := scores.GenerateTouchEvent(newDefaultVTEConfig(gameMode), chart)
 
 	t := newTui(database)
 
