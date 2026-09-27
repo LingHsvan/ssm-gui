@@ -14,8 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +24,7 @@ import (
 	"github.com/kvarenzn/ssm/config"
 	"github.com/kvarenzn/ssm/controllers"
 	"github.com/kvarenzn/ssm/log"
+	"github.com/kvarenzn/ssm/songmatch"
 )
 
 // ─────────────────────────────────────────────────────────────
@@ -153,15 +152,14 @@ func ocrImageTextsImage(img image.Image) ([]string, time.Duration, error) {
 // Song candidates
 // ─────────────────────────────────────────────────────────────
 
-type songCandidate struct {
-	SongID int
-	Titles []string
-}
+// songCandidate aliases the shared matcher type so the song-DB loading code
+// below reads exactly as before the matching logic moved to package
+// songmatch (which has no cgo dependencies and is unit tested on its own).
+type songCandidate = songmatch.SongCandidate
 
 var (
-	candMu      sync.Mutex
-	candCache   = map[string][]songCandidate{}
-	nonWordChRE = regexp.MustCompile(`[\s\p{P}\p{S}]+`)
+	candMu    sync.Mutex
+	candCache = map[string][]songCandidate{}
 )
 
 // loadLocalFirst prefers the on-disk cache so detection latency never waits
@@ -245,152 +243,10 @@ func uniqueNonEmpty(in []string) []string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Fuzzy title matching (ported from MaestroMiner game/songdetect)
+// Fuzzy title matching (ported from MaestroMiner game/songdetect) now lives
+// in package songmatch: it has no cgo dependencies and is unit tested there.
+// gui only feeds it the OCR texts plus the song DB loaded above.
 // ─────────────────────────────────────────────────────────────
-
-const songScoreThreshold = 74
-
-func normalizeSongText(s string) string {
-	s = strings.TrimSpace(strings.ToLower(s))
-	return nonWordChRE.ReplaceAllString(s, "")
-}
-
-func scoreTextMatch(query, title string) int {
-	q := normalizeSongText(query)
-	t := normalizeSongText(title)
-	if q == "" || t == "" {
-		return 0
-	}
-	if q == t {
-		return 100
-	}
-	qLen, tLen := len([]rune(q)), len([]rune(t))
-	if qLen <= 2 || tLen <= 2 {
-		return 0
-	}
-	shortLen, longLen := qLen, tLen
-	if qLen > tLen {
-		shortLen, longLen = tLen, qLen
-	}
-	if strings.Contains(q, t) || strings.Contains(t, q) {
-		if float64(shortLen)/float64(longLen) < 0.55 {
-			return 0
-		}
-		return 92
-	}
-	if strings.HasPrefix(q, t) || strings.HasPrefix(t, q) {
-		return 86
-	}
-	d := levenshteinDistance(q, t)
-	maxLen := qLen
-	if tLen > maxLen {
-		maxLen = tLen
-	}
-	similarity := 1 - float64(d)/float64(maxLen)
-	if similarity >= 0.90 {
-		return 84
-	}
-	if similarity >= 0.80 {
-		return 74
-	}
-	return 0
-}
-
-type matchCand struct {
-	SongID int    `json:"songId"`
-	Title  string `json:"title"`
-	Score  int    `json:"score"`
-}
-
-func rankByTexts(texts []string, cands []songCandidate) (best matchCand, top []matchCand) {
-	topBySong := map[int]matchCand{}
-	for _, text := range texts {
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
-		for _, song := range cands {
-			maxScore, titleHit := 0, ""
-			for _, title := range song.Titles {
-				if sc := scoreTextMatch(text, title); sc > maxScore {
-					maxScore, titleHit = sc, title
-				}
-			}
-			if maxScore == 0 {
-				continue
-			}
-			if prev, ok := topBySong[song.SongID]; !ok || maxScore > prev.Score {
-				topBySong[song.SongID] = matchCand{SongID: song.SongID, Title: titleHit, Score: maxScore}
-			}
-		}
-	}
-	list := make([]matchCand, 0, len(topBySong))
-	for _, c := range topBySong {
-		list = append(list, c)
-	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Score == list[j].Score {
-			return list[i].SongID < list[j].SongID
-		}
-		return list[i].Score > list[j].Score
-	})
-	if len(list) > 5 {
-		list = list[:5]
-	}
-	if len(list) > 0 {
-		best = list[0]
-	}
-	return best, list
-}
-
-func detectByTexts(texts []string, cands []songCandidate, threshold int) (matchCand, []matchCand, bool) {
-	if threshold <= 0 {
-		threshold = songScoreThreshold
-	}
-	best, top := rankByTexts(texts, cands)
-	confident := best.Score >= threshold && best.SongID > 0
-	if confident && best.Score < 92 && len(top) > 1 {
-		confident = best.Score-top[1].Score >= 8
-	}
-	return best, top, confident
-}
-
-func levenshteinDistance(a, b string) int {
-	ar, br := []rune(a), []rune(b)
-	la, lb := len(ar), len(br)
-	if la == 0 {
-		return lb
-	}
-	if lb == 0 {
-		return la
-	}
-	prev := make([]int, lb+1)
-	curr := make([]int, lb+1)
-	for j := 0; j <= lb; j++ {
-		prev[j] = j
-	}
-	for i := 1; i <= la; i++ {
-		curr[0] = i
-		for j := 1; j <= lb; j++ {
-			cost := 1
-			if ar[i-1] == br[j-1] {
-				cost = 0
-			}
-			ins := curr[j-1] + 1
-			del := prev[j] + 1
-			sub := prev[j-1] + cost
-			m := ins
-			if del < m {
-				m = del
-			}
-			if sub < m {
-				m = sub
-			}
-			curr[j] = m
-		}
-		prev, curr = curr, prev
-	}
-	return prev[lb]
-}
 
 // ─────────────────────────────────────────────────────────────
 // HTTP handler
@@ -568,7 +424,7 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"load song db: `+err.Error()+`"}`, http.StatusBadGateway)
 		return
 	}
-	best, top, confident := detectByTexts(texts, cands, threshold)
+	best, top, confident := songmatch.Detect(texts, cands, threshold)
 	matchMs := time.Since(t2).Seconds() * 1000
 
 	resp := map[string]interface{}{
@@ -578,11 +434,11 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		"via":         transport,
 		"hidReleased": hidReleased,
 		"matched":     confident,
-		"songId":     best.SongID,
-		"title":      best.Title,
-		"score":      best.Score,
-		"candidates": top,
-		"roi":        roi,
+		"songId":      best.SongID,
+		"title":       best.Title,
+		"score":       best.Score,
+		"candidates":  top,
+		"roi":         roi,
 		"timings": map[string]float64{
 			"screencapMs": screencapMs,
 			"frameMs":     frameMs,
@@ -648,6 +504,9 @@ func (s *Server) adbScreencapForDetect(serial string) ([]byte, time.Duration, st
 	adbCaptureMu.Lock()
 	defer adbCaptureMu.Unlock()
 	start := time.Now()
+	// Remember whether this capture started the server; a server that was
+	// already running belongs to a live session and must not be stopped.
+	startedByUs := !adb.IsADBServerRunning("localhost", 5037)
 	if err := adb.StartADBServer("localhost", 5037); err != nil && err != adb.ErrADBServerRunning {
 		return nil, 0, "usb", fmt.Errorf("start adb server: %w", err)
 	}
@@ -676,29 +535,51 @@ func (s *Server) adbScreencapForDetect(serial string) ([]byte, time.Duration, st
 				state, _ := d.State()
 				seen = append(seen, fmt.Sprintf("%s(%s)", d.Serial(), state))
 			}
-			adb.StopADBServer("localhost", 5037)
+			s.stopAdbServerIfSafe(startedByUs)
 			if len(seen) == 0 {
 				return nil, 0, "usb", fmt.Errorf("no adb device found after waiting; is the device connected with USB debugging on?")
 			}
-			return nil, 0, "usb", fmt.Errorf("no usable adb device (seen: %s)", strings.Join(seen, ", "))
+			return nil, 0, "usb", fmt.Errorf("no usable adb device (seen: %s); only devices added in Settings are used — run Auto Detect to add one", strings.Join(seen, ", "))
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
 
 	pngBytes, err := device.RawSh("screencap", "-p")
 	if err != nil {
-		adb.StopADBServer("localhost", 5037)
+		s.stopAdbServerIfSafe(startedByUs)
 		return nil, 0, "usb", fmt.Errorf("screencap: %w", err)
 	}
-	// Restore HID safety: the server must not keep holding the ADB interface.
-	_ = adb.StopADBServer("localhost", 5037)
+	// Restore HID safety when safe: the server must not keep holding the ADB
+	// interface unless a live adb session still needs it.
+	s.stopAdbServerIfSafe(startedByUs)
 	return pngBytes, time.Since(start), "usb", nil
 }
 
+// stopAdbServerIfSafe stops the shared adb server only when this capture
+// started it and nothing else depends on it: no loaded/playing scrcpy session
+// and no in-flight controller open. The old unconditional stop could tear
+// down an already-armed session, after which "Start" appeared to do nothing.
+func (s *Server) stopAdbServerIfSafe(startedByUs bool) {
+	if !startedByUs || s.adbBusy.Load() {
+		return
+	}
+	s.mu.Lock()
+	st := s.state
+	ctrl := s.controller
+	s.mu.Unlock()
+	if st != StateIdle {
+		return
+	}
+	if _, isScrcpy := ctrl.(*controllers.ScrcpyController); isScrcpy {
+		return
+	}
+	_ = adb.StopADBServer("localhost", 5037)
+}
 
-
-// pickDetectDevice: explicit serial first, then a configured device, then any
-// authorized device.
+// pickDetectDevice: an explicit serial is used when it is connected and
+// authorized; otherwise selection is limited to connected, authorized
+// devices registered in Device Management — unregistered devices are ignored
+// on purpose, so add them via Auto Detect or Settings first.
 func pickDetectDevice(devices []*adb.Device, serial string, configured map[string]config.DeviceConfig) *adb.Device {
 	serial = strings.TrimSpace(serial)
 	if serial != "" {
@@ -709,14 +590,15 @@ func pickDetectDevice(devices []*adb.Device, serial string, configured map[strin
 		}
 		return nil
 	}
-	for _, d := range devices {
-		if d.Authorized() {
-			if _, ok := configured[d.Serial()]; ok {
-				return d
-			}
-		}
+	recorded := make(map[string]struct{}, len(configured))
+	for s := range configured {
+		recorded[s] = struct{}{}
 	}
-	return adb.FirstAuthorizedDevice(devices)
+	device, _, err := adb.PickDevice(devices, "", recorded)
+	if err != nil {
+		return nil
+	}
+	return device
 }
 
 // imageToGray converts any decoded image to grayscale (stdlib only).

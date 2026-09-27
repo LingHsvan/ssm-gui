@@ -18,12 +18,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kvarenzn/ssm/adb"
 	"github.com/kvarenzn/ssm/common"
 	"github.com/kvarenzn/ssm/config"
 	"github.com/kvarenzn/ssm/controllers"
+	"github.com/kvarenzn/ssm/log"
 )
 
 //go:embed frontend/dist
@@ -88,6 +90,10 @@ type Server struct {
 	greatReq   int64
 	greatApply int64
 
+	// adbBusy is set while an adb-based controller (scrcpy) is being opened
+	// or is in use, so Auto Detect never stops the shared adb server under it.
+	adbBusy atomic.Bool
+
 	startCh  chan struct{}
 	offsetCh chan int
 	stopCh   chan struct{}
@@ -113,6 +119,13 @@ func NewServer(port int, conf *config.Config) *Server {
 	s.stopCh = make(chan struct{})
 	s.offsetCh = make(chan int, 32)
 	return s
+}
+
+// MarkAdbBusy records whether an adb-based controller (scrcpy) is being
+// opened or used. While busy, Auto Detect must not stop the shared adb
+// server the playback path depends on.
+func (s *Server) MarkAdbBusy(busy bool) {
+	s.adbBusy.Store(busy)
 }
 
 // ─── SSE ───────────────────────────────────────
@@ -213,7 +226,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if s.OnRunRequest != nil {
-		s.OnRunRequest(req)
+		// Never block the HTTP response on the run queue: a previous run
+		// that is still stopping must not make "Load" hang. The state
+		// advances over SSE as the run actually makes progress.
+		go s.OnRunRequest(req)
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -551,6 +567,12 @@ func (s *Server) Autoplay(ctx context.Context, start time.Time) {
 
 		if remaining <= 0 {
 			ctrl.Send(event.Data)
+			if sc, ok := ctrl.(*controllers.ScrcpyController); ok && sc.Broken() {
+				// The control connection died: abort instead of running through
+				// the rest of the chart against a dead socket.
+				log.Warnf("[GUI] autoplay aborted early: control connection to the device was lost")
+				goto done
+			}
 			current++
 			continue
 		}
@@ -614,12 +636,21 @@ func (s *Server) handleKillAdb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command("adb", "kill-server")
+	// Bound the call: a wedged adb binary must not hang this HTTP request.
+	// Errors are still ignored on purpose (kill is best-effort).
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "adb", "kill-server")
 	_ = cmd.Run()
 
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleDetectAdb powers the "Auto Detect" button: it starts the adb server
+// when needed (a cold server not having been started by `adb devices` is
+// exactly why detection used to fail), waits for the device list to settle,
+// registers the found device's resolution, and restores the previous server
+// state before replying.
 func (s *Server) handleDetectAdb(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -627,20 +658,84 @@ func (s *Server) handleDetectAdb(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 
-	client := adb.NewDefaultClient()
-	devices, err := client.Devices()
+	// Serialize with the detect-song screencap cycle (songocr.go): both
+	// start/stop the one global adb server.
+	adbCaptureMu.Lock()
+	defer adbCaptureMu.Unlock()
 
-	if err != nil || len(devices) == 0 {
-		json.NewEncoder(w).Encode(map[string]string{"serial": ""})
+	// Only restore "server off" when the server was off before this call; a
+	// server the user (or a capture cycle) already had running is left alone.
+	// Never stop it while an adb controller (scrcpy) is being opened or a
+	// run is not idle — that yanks the server out from under a transfer
+	// (forward / push / screencap) that is still using it.
+	startedByUs := !adb.IsADBServerRunning("localhost", 5037)
+	defer func() {
+		if !startedByUs || s.adbBusy.Load() {
+			return
+		}
+		s.mu.Lock()
+		idle := s.state == StateIdle
+		s.mu.Unlock()
+		if idle {
+			_ = adb.StopADBServer("localhost", 5037)
+		}
+	}()
+
+	client := adb.NewDefaultClient()
+
+	// A cold adb server takes ~2s to enumerate USB devices, and a server can
+	// also die mid-poll — so every iteration (re)starts it and re-lists.
+	var devices []*adb.Device
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if err := adb.StartADBServer("localhost", 5037); err != nil && err != adb.ErrADBServerRunning {
+			break
+		}
+		if ds, err := client.Devices(); err == nil {
+			devices = ds
+			if adb.FirstAuthorizedDevice(ds) != nil {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	// Prefer a device already registered in Device Management; fall back to
+	// the first authorized device — Auto Detect is how new devices get added.
+	device := adb.PickRecordedOrFirstAuthorized(devices, s.conf.RecordedSerials())
+	if device == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"serial": "", "seen": len(devices)})
 		return
 	}
 
-	device := adb.FirstAuthorizedDevice(devices)
-	if device != nil {
-		json.NewEncoder(w).Encode(map[string]string{"serial": device.Serial()})
-	} else {
-		json.NewEncoder(w).Encode(map[string]string{"serial": ""})
+	// Register (or refresh) the device's resolution so playback can start
+	// right away — the same data Settings' "Add / Update Device" stores.
+	width, height := 0, 0
+	if out, err := device.Sh("wm", "size"); err == nil {
+		width, height = adb.ParseWMSize(out)
 	}
+	saved := "none"
+	if width > 0 && height > 0 {
+		_, existed := s.conf.Snapshot()[device.Serial()]
+		if err := s.conf.SetDevice(device.Serial(), width, height); err == nil {
+			if existed {
+				saved = "updated"
+			} else {
+				saved = "added"
+			}
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"serial": device.Serial(),
+		"width":  width,
+		"height": height,
+		"saved":  saved,
+		"seen":   len(devices),
+	})
 }
 
 // ─── Startup ──────────────────────────────────────
