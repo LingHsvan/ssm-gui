@@ -4,17 +4,23 @@
 package adb
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 )
 
 var (
 	ErrADBServerRunning    = errors.New("adb server already running")
 	ErrADBServerNotRunning = errors.New("adb server not running")
 )
+
+// adbServerStartTimeout bounds each `adb start-server` invocation so a
+// wedged adb executable cannot block the caller forever.
+const adbServerStartTimeout = 30 * time.Second
 
 func IsDefaultHostAndPort(host string, port int) bool {
 	return host == ADBDefaultServerHost && port == ADBDefaultServerPort
@@ -54,13 +60,18 @@ func StartADBServer(host string, port int) error {
 	// try local adb executable first
 	localExecutable := "./" + adbExecutable
 	if FileExists(localExecutable) {
-		cmd := exec.Command(localExecutable, args...)
-		if err := cmd.Run(); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), adbServerStartTimeout)
+		cmd := exec.CommandContext(ctx, localExecutable, args...)
+		err := cmd.Run()
+		cancel()
+		if err == nil {
 			return nil
 		}
 	}
 
-	cmd := exec.Command(adbExecutable, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), adbServerStartTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, adbExecutable, args...)
 	return cmd.Run()
 }
 

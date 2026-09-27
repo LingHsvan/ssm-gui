@@ -26,6 +26,10 @@ type connection struct {
 	timeout time.Duration
 }
 
+// NOTE: do NOT wrap these connections in an idle-deadline helper. Shell
+// connections are long-lived by design (e.g. the scrcpy-server launcher is
+// idle for the entire play session), and any idle timeout on them kills
+// playback mid-song.
 func NewConnection(addr string, timeout time.Duration) (*connection, error) {
 	if conn, err := net.Dial("tcp", addr); err != nil {
 		return nil, err
