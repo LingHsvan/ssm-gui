@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual release from the Actions tab: builds the selected branch and
+  # creates the tag v<version> on that commit.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 3.7.0'
+        required: true
 
 jobs:
   build_on_linux_amd64:
@@ -16,7 +23,7 @@ jobs:
       - name: Check Version
         id: version
         run: |
-          version=$(echo $GITHUB_REF | cut -d"/" -f3 | sed 's/v//g')
+          version=$(echo "${{ inputs.version || github.ref_name }}" | sed 's/v//g')
           echo "VERSION=$version" >> $GITHUB_ENV
           echo "version=$version" >> $GITHUB_OUTPUT
 
@@ -61,7 +68,7 @@ jobs:
       - name: Check Version
         id: version
         run: |
-          version=$(echo $GITHUB_REF | cut -d"/" -f3 | sed 's/v//g')
+          version=$(echo "${{ inputs.version || github.ref_name }}" | sed 's/v//g')
           echo "VERSION=$version" >> $GITHUB_ENV
           echo "version=$version" >> $GITHUB_OUTPUT
 
@@ -107,7 +114,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          version=$(echo $GITHUB_REF | cut -d"/" -f3 | sed 's/v//g')
+          version=$(echo "${{ inputs.version || github.ref_name }}" | sed 's/v//g')
           echo "VERSION=$version" >> $GITHUB_ENV
           echo "version=$version" >> $GITHUB_OUTPUT
 
@@ -177,7 +184,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          version=$(echo $GITHUB_REF | cut -d"/" -f3 | sed 's/v//g')
+          version=$(echo "${{ inputs.version || github.ref_name }}" | sed 's/v//g')
           echo "VERSION=$version" >> $GITHUB_ENV
           echo "version=$version" >> $GITHUB_OUTPUT
 
@@ -222,7 +229,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          version=$(echo $GITHUB_REF | cut -d"/" -f3 | sed 's/v//g')
+          version=$(echo "${{ inputs.version || github.ref_name }}" | sed 's/v//g')
           echo "VERSION=$version" >> $GITHUB_ENV
           echo "version=$version" >> $GITHUB_OUTPUT
 
@@ -272,7 +279,7 @@ jobs:
       - name: Check Version
         shell: bash
         run: |
-          version=$(echo $GITHUB_REF | cut -d"/" -f3 | sed 's/v//g')
+          version=$(echo "${{ inputs.version || github.ref_name }}" | sed 's/v//g')
           echo "VERSION=$version" >> $GITHUB_ENV
 
       - name: Download Artifacts
@@ -317,6 +324,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
             --title "v$VERSION" \
             --notes-file RELEASE_NOTES.md \
             builds/*.zip
