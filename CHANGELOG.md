@@ -4,13 +4,23 @@ User-facing notes for each release. The release workflow publishes the section
 that matches the tag as the GitHub release description, so write these for
 players, not for developers.
 
-## [Unreleased]
+## [3.7.0] - 2026-09-28
 
 **Core**
 - Updated to the latest upstream ssm core (kvarenzn/ssm).
+- Command-line mode now behaves exactly like upstream ssm.
+
+**Playback**
+- Fixed two songs occasionally loading at the same time when you pressed Load right as a song finished (or while Restart was re-arming it).
 - If the screen connection fails to start, or an unexpected error happens while a song is loading, the page now shows the error instead of hanging or closing the program.
 - Slide notes with position jitter now move smoothly between points.
-- Command-line mode now behaves exactly like upstream ssm.
+
+**Song list, devices & extraction**
+- The song list no longer waits forever on a stalled network (30-second timeout), and a broken download (e.g. a Wi-Fi login page) no longer replaces the saved offline copy.
+- **Extract Assets** now tells you when the folder doesn't exist, instead of reporting success.
+- Saving a device now reports when the settings file can't be written, and requires a serial, width and height.
+
+> Internally this release reorganized the GUI code so upstream updates merge cleanly, and added tests for the GUI server. If anything seems off with adb/HID playback, please open an issue.
 
 ## [3.6.1] - 2026-06-03
 
