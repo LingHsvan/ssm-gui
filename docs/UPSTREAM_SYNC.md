@@ -10,14 +10,17 @@ merging upstream stays conflict-free. The rule:
 
 | File (fork-only) | What it holds |
 |---|---|
-| `main_gui.go` | GUI entry (`-gui`, `-port`, no-argument start), playback flow, backend selection |
+| `gui_main.go` | GUI entry: `-gui` / `-port` flags, no-argument start, config, server startup |
+| `gui_player.go` | Loads a chart, generates touch events, plays one song at a time |
+| `gui_devices.go` | Opens the adb or HID device for playback |
+| `gui_browser_*.go` | Opens the browser |
+| `gui/` | Web server (one file per API area) and the embedded frontend |
 | `scores/humanize.go` | Timing/position/hold-time jitter, exact Great count, generator fixes the GUI relies on |
 | `controllers/scrcpy_gui.go` | Non-fatal send/close, `ResetTouch`, tolerant touch preprocessing |
 | `controllers/scrcpy_frames.go` | Opt-in video decoding (`SSM_ENABLE_VIDEO_DECODE=1`) and frame capture |
 | `controllers/hid_gui.go` | Non-fatal USB calls, packing pointers into the 10 HID contact slots |
 | `config/config_gui.go` | Thread-safe device accessors used by the GUI server |
 | `adb/device_reverse.go` | Per-device reverse-forward removal (works with several devices attached) |
-| `gui/`, `openbrowser_*.go` | Web server, frontend, browser launcher |
 
 ## Hooks in upstream files
 
