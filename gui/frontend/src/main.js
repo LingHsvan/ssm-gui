@@ -1231,7 +1231,10 @@ function detectSong() {
         return;
       }
       const tm = d.timings || {};
-      const tmsg = 'OCR ' + Math.round(tm.ocrMs || 0) + 'ms / ' + Math.round(tm.totalMs || 0) + 'ms';
+      // Crop/OCR sizes ride along because a mismatch is the fastest way to
+      // tell a bad ROI apart from a recogniser that simply read nothing.
+      const sizes = (d.cropSize ? ' ' + d.cropSize + (d.ocrSize && d.ocrSize !== d.cropSize ? '→' + d.ocrSize : '') : '');
+      const tmsg = 'OCR ' + Math.round(tm.ocrMs || 0) + 'ms / ' + Math.round(tm.totalMs || 0) + 'ms' + sizes;
       if (d.hidReleased) log('song-log', t('log.detect.hidclose'), 'info');
       if (d.blank) log('song-log', t('log.detect.blank'), 'err');
       if (d.matched && d.songId > 0) {

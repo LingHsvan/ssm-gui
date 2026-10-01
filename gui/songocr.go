@@ -536,6 +536,11 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		confident   bool
 		blank       bool
 		attempts    int
+		dur         time.Duration
+		cropW       int
+		cropH       int
+		ocrW        int
+		ocrH        int
 		screencapMs float64
 		frameMs     float64
 		ocrMs       float64
@@ -569,8 +574,12 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		// floors the short side to a multiple of 32, which mangles thin strips
 		// (see detInputSize). out.crop stays the raw crop for the debug preview
 		// and the blank-frame heuristic.
-		ocrW, ocrH := detInputSize(out.crop.Bounds().Dx(), out.crop.Bounds().Dy())
-		texts, dur, err := ocrImageTextsImage(resampleGray(out.crop, ocrW, ocrH))
+		// These are declared outside the loop on purpose: with `:=` here they
+		// would shadow the outer result variables and the response would report
+		// an empty text list no matter what the OCR actually read.
+		cropW, cropH = out.crop.Bounds().Dx(), out.crop.Bounds().Dy()
+		ocrW, ocrH = detInputSize(cropW, cropH)
+		texts, dur, err = ocrImageTextsImage(resampleGray(out.crop, ocrW, ocrH))
 		if err != nil {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 			return
@@ -604,6 +613,11 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		"score":       best.Score,
 		"candidates":  top,
 		"roi":         roi,
+		// Sizes make a "no match" report actionable: a crop of the wrong shape
+		// means the ROI is off, while a sane crop with empty texts means the OCR
+		// found nothing and the library is suspect.
+		"cropSize": fmt.Sprintf("%dx%d", cropW, cropH),
+		"ocrSize":  fmt.Sprintf("%dx%d", ocrW, ocrH),
 		// The device whose calibration this crop belongs to, so the debug panel
 		// can show it and reload the sliders when the user swaps devices.
 		"serial": plan.serial,
