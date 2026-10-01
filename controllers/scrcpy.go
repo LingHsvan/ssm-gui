@@ -416,6 +416,16 @@ func (c *ScrcpyController) SetFrameHandler(fn func(ScrcpyFrame)) {
 	c.frameMu.Unlock()
 }
 
+// DeviceSerial reports the serial of the device this session mirrors, or ""
+// when unknown. The song-detection ROI is calibrated per device, so a frame
+// taken from this session has to carry the device it came from.
+func (c *ScrcpyController) DeviceSerial() string {
+	if c == nil || c.device == nil {
+		return ""
+	}
+	return c.device.Serial()
+}
+
 func (c *ScrcpyController) LatestFrame() (ScrcpyFrame, bool) {
 	c.frameMu.RLock()
 	defer c.frameMu.RUnlock()

@@ -1040,12 +1040,31 @@ function resetOff() { _adjPending = 0; clearTimeout(_adjTimer); const delta = -S
 
 // ══ devices ════════════════════════════════════════════════
 function loadDevices() {
-  fetch('/api/device').then(function (r) { return r.json(); }).then(function (d) {
-    S.devices = d || {};
+  // The song-detection ROI is calibrated per device (each phone frames the title
+  // bar differently), so the list also shows which devices have one. A failure
+  // on the ROI endpoint must not blank the device list, hence the catch.
+  Promise.all([
+    fetch('/api/device').then(function (r) { return r.json(); }),
+    fetch('/api/device-roi').then(function (r) { return r.json(); }).catch(function () { return {}; }),
+  ]).then(function (res) {
+    const d = res[0] || {}, rois = res[1] || {};
+    S.devices = d;
     const list = document.getElementById('dev-list');
-    if (!d || !Object.keys(d).length) { list.innerHTML = '<div style="font-size:12px;color:var(--hint)">' + t('device.none') + '</div>'; return; }
-    list.innerHTML = Object.entries(d).map(function (e) { return '<div class="dev-row"><span class="dev-s">' + esc(e[0]) + '</span><span>' + e[1].width + ' × ' + e[1].height + '</span><button class="btn-del" data-action="deleteDevice" data-serial="' + escAttr(e[0]) + '">' + t('settings.device.delete') + '</button></div>'; }).join('');
+    if (!Object.keys(d).length) { list.innerHTML = '<div style="font-size:12px;color:var(--hint)">' + t('device.none') + '</div>'; return; }
+    list.innerHTML = Object.entries(d).map(function (e) {
+      const serial = e[0];
+      const calibrated = !!(rois[serial] && Object.keys(rois[serial]).length);
+      return '<div class="dev-row"><span class="dev-s">' + esc(serial) + '</span><span>' + e[1].width + ' × ' + e[1].height + '</span>' +
+        (calibrated
+          ? '<span class="dev-roi">' + esc(t('device.roi.calibrated')) + '</span><button class="btn-del" data-action="resetDeviceROI" data-serial="' + escAttr(serial) + '">' + t('device.roi.reset') + '</button>'
+          : '') +
+        '<button class="btn-del" data-action="deleteDevice" data-serial="' + escAttr(serial) + '">' + t('settings.device.delete') + '</button></div>';
+    }).join('');
   });
+}
+function resetDeviceROI(serial) {
+  fetch('/api/device-roi', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serial: serial }) })
+    .then(function (r) { if (r.ok) loadDevices(); });
 }
 function saveDevice() {
   const s = document.getElementById('dc-s').value.trim(), w = parseInt(document.getElementById('dc-w').value) || 0, h = parseInt(document.getElementById('dc-h').value) || 0;
@@ -1121,6 +1140,12 @@ function detectDebugToggle() {
 }
 
 let detBusy = false, detPending = false, detPendingSave = false;
+// The device the sliders currently describe. The server keys the ROI by the
+// device it actually captured, so when a *different* device answers the sliders
+// have to be reloaded — otherwise a drag would write one phone's calibration
+// onto another. An empty serial means "no device" (test image, nothing
+// pickable) and has no bucket to switch to.
+let detSerial = '', detDeviceChanged = false;
 
 function detectPreview(saveAfter, useServerRoi) {
   // Gameplay-safety: skip (and drop pending replays) only while a song is
@@ -1136,6 +1161,13 @@ function detectPreview(saveAfter, useServerRoi) {
     .then(function (r) { return r.text().then(function (tx) { try { return JSON.parse(tx); } catch (e) { return { error: tx || ('HTTP ' + r.status) }; } }); })
     .then(function (d) {
       if (d.error) { log('song-log', t('log.detect.fail') + d.error, 'err'); return; }
+      // The device this crop was calibrated against, so the panel can say which
+      // phone the sliders belong to.
+      const serial = d.serial || '';
+      const label = document.getElementById('det-device');
+      if (label) label.textContent = t('song.debug.device') + (serial || t('device.none'));
+      if (serial && detSerial && serial !== detSerial) detDeviceChanged = true;
+      if (serial) detSerial = serial;
       // Re-sync sliders only when the user has not moved them since the
       // request started — otherwise the stale echo would snap them back.
       if (d.roi && (useServerRoi || detRoiFromSliders().join(',') === roiAtRequest)) {
@@ -1154,6 +1186,15 @@ function detectPreview(saveAfter, useServerRoi) {
     .catch(function (e) { log('song-log', t('log.detect.fail') + e, 'err'); })
     .then(function () {
       detBusy = false;
+      if (detDeviceChanged) {
+        // A different device answered than the sliders were showing: reload that
+        // device's own calibration (useServerRoi) before honouring any queued
+        // drag. The response carries the serial we just stored, so this cannot
+        // retrigger itself.
+        detDeviceChanged = false;
+        const panel = document.getElementById('det-debug');
+        if (panel && !panel.classList.contains('hidden')) { detectPreview(false, true); return; }
+      }
       if (detPending) { detPending = false; const s = detPendingSave; detPendingSave = false; detectPreview(s); }
     });
 }
@@ -1359,6 +1400,7 @@ const ACTIONS = {
   selSong: function (arg) { selSong(parseInt(arg)); },
   selectDevSerial: function (arg, el) { selectDevSerial(el.dataset.serial); },
   deleteDevice: function (arg, el) { deleteDevice(el.dataset.serial); },
+  resetDeviceROI: function (arg, el) { resetDeviceROI(el.dataset.serial); },
   toggleDevDrop: function (arg, el, e) { toggleDevDrop(e); },
   onQKey: function (arg, el, e) { onQKey(e); },
 };

@@ -337,6 +337,27 @@ func parseROIParam(s string) ([4]float64, bool) {
 	return roi, true
 }
 
+// chooseSongROI resolves the crop to use, in priority order: an explicit ROI
+// from the request (the debug panel's sliders while they are being dragged),
+// this device's saved calibration, the shared mode-level calibration kept for
+// configs predating per-device storage, and finally the built-in default.
+// reqROI must already have been clamped by the caller.
+func chooseSongROI(reqROI [4]float64, reqOK bool,
+	devROI [4]float64, devOK bool,
+	modeROI [4]float64, modeOK bool,
+	def [4]float64) [4]float64 {
+	switch {
+	case reqOK:
+		return reqROI
+	case devOK:
+		return devROI
+	case modeOK:
+		return modeROI
+	default:
+		return def
+	}
+}
+
 func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	mode := common.NormalizeMode(q.Get("mode"))
@@ -344,6 +365,79 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 	threshold := 0
 	fmt.Sscanf(q.Get("threshold"), "%d", &threshold)
 
+	// The song DB is loaded up front on purpose: its cold start hits the
+	// network, and the device session opened below holds adbCaptureMu for as
+	// long as this request lives. Failing here also avoids arming an adb
+	// session only to return 502.
+	cands, err := loadSongCandidates(mode)
+	if err != nil {
+		http.Error(w, `{"error":"load song db: `+err.Error()+`"}`, http.StatusBadGateway)
+		return
+	}
+
+	// ── 0. pick the frame source, and with it the device this run belongs to ──
+	// The ROI is calibrated per device, so the crop cannot be chosen until the
+	// device is known. That is why the capture is no longer a single black box
+	// that both picks the device and crops: the source is resolved once, here,
+	// and reports the serial it will capture from.
+	type capturePlan struct {
+		source      string // "test" | "scrcpy" | "screencap"
+		sc          *controllers.ScrcpyController
+		sess        *detectDeviceSession
+		serial      string
+		hidReleased bool
+	}
+	var plan capturePlan
+
+	if testPath := q.Get("test"); testPath != "" {
+		// A local test image has no device: the ROI falls back to the shared
+		// mode-level bucket and a save lands there too. This path deliberately
+		// keeps working exactly as before.
+		plan.source = "test"
+	} else {
+		s.mu.Lock()
+		ctrl := s.controller
+		st := s.state
+		s.mu.Unlock()
+
+		// A live scrcpy session already knows its device, so no adb round trip
+		// is needed to key the ROI. Prefer it when it has a frame to give.
+		if sc, ok := ctrl.(*controllers.ScrcpyController); ok && sc != nil {
+			if frame, ok := sc.LatestFrame(); ok && len(frame.Plane0) > 0 {
+				plan.source = "scrcpy"
+				plan.sc = sc
+				plan.serial = sc.DeviceSerial()
+			}
+		}
+
+		if plan.source == "" {
+			// HID backend, not armed, or a scrcpy session with no frame yet:
+			// take a one-shot adb screencap. Playing is the one state where
+			// touching adb is off limits.
+			if st == StatePlaying {
+				http.Error(w, `{"error":"playback in progress; detect after it ends"}`, http.StatusConflict)
+				return
+			}
+			// The open libusb handle holds the WinUSB interface, which makes adb
+			// blind to the device, so release it before opening the session.
+			// This also covers the Ready state: in multiplayer the user sits
+			// armed while matchmaking and needs re-detection — the stale chart
+			// is discarded and re-armed via a fresh Load.
+			plan.hidReleased = s.releaseHIDForDetect(ctrl)
+
+			sess, openErr := s.openDetectDeviceSession(q.Get("serial"))
+			if openErr != nil {
+				http.Error(w, `{"error":"`+openErr.Error()+`"}`, http.StatusConflict)
+				return
+			}
+			defer sess.Close()
+			plan.source = "screencap"
+			plan.sess = sess
+			plan.serial = sess.Serial()
+		}
+	}
+
+	// ── 1. ROI: request param, then this device, then the shared mode bucket ──
 	roi, roiOK := parseROIParam(q.Get("roi"))
 	if roiOK {
 		// Echo the clamped ROI so the response matches the crop actually used.
@@ -352,23 +446,22 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		roi[2] = clampf(roi[2], 0.01, 1-roi[0])
 		roi[3] = clampf(roi[3], 0.01, 1-roi[1])
 	}
-	if !roiOK {
-		// No roi in the request: use the saved calibration (or defaults).
-		if cfgROI, ok := s.conf.SongDetectROI[mode]; ok {
-			roi, roiOK = cfgROI, true
-		} else {
-			roi = defaultSongROI[mode]
-		}
+	var devROI, modeROI [4]float64
+	var devOK, modeOK bool
+	if plan.serial != "" {
+		devROI, devOK = s.conf.SongDetectROIFor(plan.serial, mode)
 	}
+	modeROI, modeOK = s.conf.SongDetectROIMode(mode)
+	roi = chooseSongROI(roi, roiOK, devROI, devOK, modeROI, modeOK, defaultSongROI[mode])
+
 	if q.Get("save") == "1" {
-		if s.conf.SongDetectROI == nil {
-			s.conf.SongDetectROI = map[string][4]float64{}
-		}
-		s.conf.SongDetectROI[mode] = roi
-		_ = s.conf.Save()
+		// Bucketed by the device that was actually captured, never by whatever
+		// the caller claimed. An empty serial (test image, nothing pickable)
+		// lands in the shared bucket instead of nowhere.
+		_ = s.conf.SetSongDetectROI(plan.serial, mode, roi)
 	}
 
-	// ── 1. source image ──
+	// ── 2. source image ──
 	// A one-shot capture can land while the game is still drawing the title bar
 	// — the strip wipes in from the left, and the frame that produced
 	// "OCR 文本: [Mas?u]" was taken ~20% through「Mas?uerade Rhapsody Re?uest」
@@ -384,91 +477,54 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		hidReleased bool
 	}
 	capture := func() (captureOut, int, string) {
-		out := captureOut{source: "test", transport: "test"}
-		if testPath := q.Get("test"); testPath != "" {
-			data, err := os.ReadFile(testPath)
-			if err != nil {
-				return out, http.StatusBadRequest, "test image: " + err.Error()
+		// The source was decided in step 0 and never changes mid-request, so
+		// the crop below always uses the ROI of the device this run captured.
+		out := captureOut{source: plan.source, hidReleased: plan.hidReleased}
+		switch plan.source {
+		case "test":
+			out.transport = "test"
+			data, readErr := os.ReadFile(q.Get("test"))
+			if readErr != nil {
+				return out, http.StatusBadRequest, "test image: " + readErr.Error()
 			}
-			img, _, err := image.Decode(strings.NewReader(string(data)))
-			if err != nil {
-				return out, http.StatusBadRequest, "decode test image: " + err.Error()
+			img, _, decErr := image.Decode(strings.NewReader(string(data)))
+			if decErr != nil {
+				return out, http.StatusBadRequest, "decode test image: " + decErr.Error()
 			}
 			out.crop = imageToGray(img)
 			out.full = out.crop
 			return out, 0, ""
-		}
 
-		s.mu.Lock()
-		ctrl := s.controller
-		s.mu.Unlock()
-		var frame controllers.ScrcpyFrame
-		var frameOK bool
-		if sc, ok := ctrl.(*controllers.ScrcpyController); ok {
-			frame, frameOK = sc.LatestFrame()
-			frameOK = frameOK && len(frame.Plane0) > 0
-		}
-		if frameOK {
+		case "scrcpy":
+			frame, frameOK := plan.sc.LatestFrame()
+			if !frameOK || len(frame.Plane0) == 0 {
+				// The session can die between the plan and this capture; the
+				// old code silently fell through to adb here, which would have
+				// cropped with a different device's ROI.
+				return out, http.StatusConflict, `{"error":"scrcpy frame unavailable"}`
+			}
 			gray := &image.Gray{Pix: frame.Plane0, Stride: frame.Width, Rect: image.Rect(0, 0, frame.Width, frame.Height)}
 			out.crop = cropGray(gray, roi)
 			out.full = gray
-			out.source = "scrcpy"
 			return out, 0, ""
 		}
 
-		// HID backend or not armed: take a one-shot adb screencap. The adb
-		// server must be alive only for this call (it fights libusb for the
-		// ADB interface HID needs), so it is stopped again right after.
-		s.mu.Lock()
-		st := s.state
-		armed := s.controller
-		s.mu.Unlock()
-		if st == StatePlaying {
-			return out, http.StatusConflict, `{"error":"playback in progress; detect after it ends"}`
-		}
-		if hid, isHID := armed.(*controllers.HIDController); isHID && hid != nil {
-			// The open libusb handle holds the WinUSB interface, which makes
-			// adb blind to the device. Release it for the capture. This also
-			// covers the Ready state: in multiplayer the user sits armed while
-			// matchmaking and needs re-detection — the stale chart is discarded
-			// and re-armed via a fresh Load.
-			_ = hid.Close()
-			s.mu.Lock()
-			s.controller = nil
-			if s.state == StateDone || s.state == StateReady {
-				if s.state == StateReady {
-					select {
-					case <-s.stopCh:
-					default:
-						close(s.stopCh)
-					}
-				}
-				s.state = StateIdle
-			}
-			s.mu.Unlock()
-			s.broadcastState()
-			out.hidReleased = true
-		}
-		pngBytes, capDur, via, capErr := s.adbScreencapForDetect(q.Get("serial"))
+		// One-shot adb screencap through the session opened in step 0. The adb
+		// server stays alive for the whole request (it fights libusb for the ADB
+		// interface HID needs) and is stopped again by sess.Close().
+		out.transport = "usb"
+		pngBytes, capDur, capErr := plan.sess.Screencap()
 		if capErr != nil {
 			return out, http.StatusConflict, `{"error":"` + capErr.Error() + `"}`
 		}
 		out.screencapMs = capDur.Seconds() * 1000
-		out.transport = via
-		img, _, err := image.Decode(bytes.NewReader(pngBytes))
-		if err != nil {
-			return out, http.StatusInternalServerError, `{"error":"decode screencap: ` + err.Error() + `"}`
+		img, _, decErr := image.Decode(bytes.NewReader(pngBytes))
+		if decErr != nil {
+			return out, http.StatusInternalServerError, `{"error":"decode screencap: ` + decErr.Error() + `"}`
 		}
 		out.full = imageToGray(img)
 		out.crop = cropGray(out.full, roi)
-		out.source = "screencap"
 		return out, 0, ""
-	}
-
-	cands, err := loadSongCandidates(mode)
-	if err != nil {
-		http.Error(w, `{"error":"load song db: `+err.Error()+`"}`, http.StatusBadGateway)
-		return
 	}
 
 	const detectAttempts = 2
@@ -499,8 +555,8 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 			if out.full != nil {
 				dfw, dfh = out.full.Bounds().Dx(), out.full.Bounds().Dy()
 			}
-			http.Error(w, fmt.Sprintf(`{"error":"empty crop: frame %dx%d, roi %v (config %v default %v) -> pw=%d ph=%d; adjust roi"}`,
-				dfw, dfh, roi, s.conf.SongDetectROI, defaultSongROI[mode],
+			http.Error(w, fmt.Sprintf(`{"error":"empty crop: frame %dx%d, roi %v (serial %q device %v shared %v default %v) -> pw=%d ph=%d; adjust roi"}`,
+				dfw, dfh, roi, plan.serial, devROI, modeROI, defaultSongROI[mode],
 				int(clampf(roi[2], 0, 1)*float64(dfw)), int(clampf(roi[3], 0, 1)*float64(dfh))), http.StatusBadRequest)
 			return
 		}
@@ -548,6 +604,9 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		"score":       best.Score,
 		"candidates":  top,
 		"roi":         roi,
+		// The device whose calibration this crop belongs to, so the debug panel
+		// can show it and reload the sliders when the user swaps devices.
+		"serial": plan.serial,
 		"timings": map[string]float64{
 			"screencapMs": screencapMs,
 			"frameMs":     frameMs,
@@ -588,25 +647,47 @@ func clampf(v, lo, hi float64) float64 {
 	return v
 }
 
-// adbCaptureMu serializes the whole start-capture-kill adb cycle: overlapping
-// detect requests used to kill the adb server under each other's screencap
-// ("wsarecv: connection forcibly closed").
+// adbCaptureMu serializes the whole detect-capture cycle: overlapping detect
+// requests used to kill the adb server under each other's screencap
+// ("wsarecv: connection forcibly closed"). A detectDeviceSession holds it from
+// open until Close, so it now spans one full request rather than one capture.
 var adbCaptureMu sync.Mutex
 
-// adbScreencapForDetect grabs a one-shot screenshot for the given (or
-// auto-selected) device. When wireless debugging is configured it captures
-// over WiFi first (never touching the USB interface HID owns) and falls back
-// to the USB path on any failure. Either way the adb server is started for
-// the capture and stopped afterwards so it cannot linger on USB.
-func (s *Server) adbScreencapForDetect(serial string) ([]byte, time.Duration, string, error) {
+// detectDeviceSession owns the shared adb server for the lifetime of one
+// detect request. It is opened before the ROI is resolved — the crop is
+// calibrated per device, so the device has to be known first — and the server
+// is stopped again in Close so it cannot linger on the USB interface HID needs.
+//
+// Holding adbCaptureMu for the whole request is deliberate: releasing it right
+// after the pick would let a second detect request open its own session with
+// startedByUs=false, and this session's Close would then stop the very server
+// the other request is still using.
+type detectDeviceSession struct {
+	s           *Server
+	device      *adb.Device
+	startedByUs bool
+	closed      bool
+}
+
+// openDetectDeviceSession starts the adb server and polls for a usable device
+// (an explicitly requested serial when it is connected and authorized,
+// otherwise a registered + authorized one). On error adbCaptureMu has already
+// been released; every successful open must be paired with a Close.
+func (s *Server) openDetectDeviceSession(serial string) (*detectDeviceSession, error) {
 	adbCaptureMu.Lock()
-	defer adbCaptureMu.Unlock()
-	start := time.Now()
-	// Remember whether this capture started the server; a server that was
+	// Remember whether this session started the server; a server that was
 	// already running belongs to a live session and must not be stopped.
 	startedByUs := !adb.IsADBServerRunning("localhost", 5037)
+	// Every failure has to stop the server if we started it and release the
+	// lock, so route them all through here.
+	fail := func(err error) (*detectDeviceSession, error) {
+		s.stopAdbServerIfSafe(startedByUs)
+		adbCaptureMu.Unlock()
+		return nil, err
+	}
+
 	if err := adb.StartADBServer("localhost", 5037); err != nil && err != adb.ErrADBServerRunning {
-		return nil, 0, "usb", fmt.Errorf("start adb server: %w", err)
+		return fail(fmt.Errorf("start adb server: %w", err))
 	}
 	client := adb.NewDefaultClient()
 
@@ -618,7 +699,7 @@ func (s *Server) adbScreencapForDetect(serial string) ([]byte, time.Duration, st
 	deadline := time.Now().Add(8 * time.Second)
 	for {
 		if err := adb.StartADBServer("localhost", 5037); err != nil && err != adb.ErrADBServerRunning {
-			return nil, 0, "usb", fmt.Errorf("start adb server: %w", err)
+			return fail(fmt.Errorf("start adb server: %w", err))
 		}
 		if devices, err := client.Devices(); err == nil {
 			lastDevices = devices
@@ -633,24 +714,80 @@ func (s *Server) adbScreencapForDetect(serial string) ([]byte, time.Duration, st
 				state, _ := d.State()
 				seen = append(seen, fmt.Sprintf("%s(%s)", d.Serial(), state))
 			}
-			s.stopAdbServerIfSafe(startedByUs)
 			if len(seen) == 0 {
-				return nil, 0, "usb", fmt.Errorf("no adb device found after waiting; is the device connected with USB debugging on?")
+				return fail(fmt.Errorf("no adb device found after waiting; is the device connected with USB debugging on?"))
 			}
-			return nil, 0, "usb", fmt.Errorf("no usable adb device (seen: %s); only devices added in Settings are used — run Auto Detect to add one", strings.Join(seen, ", "))
+			return fail(fmt.Errorf("no usable adb device (seen: %s); only devices added in Settings are used — run Auto Detect to add one", strings.Join(seen, ", ")))
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	pngBytes, err := device.RawSh("screencap", "-p")
-	if err != nil {
-		s.stopAdbServerIfSafe(startedByUs)
-		return nil, 0, "usb", fmt.Errorf("screencap: %w", err)
+	return &detectDeviceSession{s: s, device: device, startedByUs: startedByUs}, nil
+}
+
+// Serial reports the device this session captures from, or "" when none was
+// resolved. This is the key a ROI calibration is stored under.
+func (d *detectDeviceSession) Serial() string {
+	if d == nil || d.device == nil {
+		return ""
 	}
-	// Restore HID safety when safe: the server must not keep holding the ADB
-	// interface unless a live adb session still needs it.
-	s.stopAdbServerIfSafe(startedByUs)
-	return pngBytes, time.Since(start), "usb", nil
+	return d.device.Serial()
+}
+
+// Screencap takes one frame from the session's device. Only the RawSh itself is
+// timed: the adb server is already up, so this is no longer the "whole
+// start-capture-kill cycle" the old one-shot helper used to report.
+func (d *detectDeviceSession) Screencap() ([]byte, time.Duration, error) {
+	if d == nil || d.device == nil {
+		return nil, 0, fmt.Errorf("no device in session")
+	}
+	start := time.Now()
+	pngBytes, err := d.device.RawSh("screencap", "-p")
+	if err != nil {
+		return nil, 0, fmt.Errorf("screencap: %w", err)
+	}
+	return pngBytes, time.Since(start), nil
+}
+
+// Close stops the adb server when safe and releases adbCaptureMu. It is
+// idempotent, so a deferred call plus an explicit one cannot unlock twice.
+func (d *detectDeviceSession) Close() {
+	if d == nil || d.closed {
+		return
+	}
+	d.closed = true
+	d.s.stopAdbServerIfSafe(d.startedByUs)
+	adbCaptureMu.Unlock()
+}
+
+// releaseHIDForDetect closes an armed HID controller so adb can see the device,
+// resets the server to Idle and broadcasts the change. Returns true when a
+// controller was actually released. It must run before the adb session is
+// opened: the libusb handle holds the WinUSB interface, which makes adb blind
+// to the device. This also covers the Ready state — in multiplayer the user
+// sits armed while matchmaking and needs re-detection, so the stale chart is
+// discarded and re-armed via a fresh Load.
+func (s *Server) releaseHIDForDetect(ctrl controllers.Controller) bool {
+	hid, isHID := ctrl.(*controllers.HIDController)
+	if !isHID || hid == nil {
+		return false
+	}
+	_ = hid.Close()
+	s.mu.Lock()
+	s.controller = nil
+	if s.state == StateDone || s.state == StateReady {
+		if s.state == StateReady {
+			select {
+			case <-s.stopCh:
+			default:
+				close(s.stopCh)
+			}
+		}
+		s.state = StateIdle
+	}
+	s.mu.Unlock()
+	s.broadcastState()
+	return true
 }
 
 // stopAdbServerIfSafe stops the shared adb server only when this capture

@@ -47,6 +47,11 @@ const songDB = {
 
 const devices = { TESTSERIAL: { width: 1080, height: 2340 } };
 
+// Per-device song-detection ROI calibrations served by /api/device-roi. Only
+// TESTSERIAL has one, so the other device can be used to check the badge is
+// not drawn for every row.
+let deviceRois = { TESTSERIAL: { bang: [0.28, 0.05, 0.45, 0.18] } };
+
 // Mutable per-test responses for the detect endpoints.
 let detectAdbResp = { serial: 'TESTSERIAL' };
 let detectSongResp = { matched: false, candidates: [] };
@@ -76,6 +81,9 @@ function mockFetch(url, init) {
   const u = String(url);
   if (u.includes('/locales/zh-TW.json')) return jsonResp(zhTwLocale);
   if (u.includes('/locales/')) return jsonResp(enLocale);
+  // Must come before /api/device: that branch matches the /api/device-roi
+  // prefix too and would shadow this one.
+  if (u.includes('/api/device-roi')) return jsonResp(deviceRois);
   if (u.includes('/api/device')) return jsonResp(devices);
   if (u.includes('/api/tuning')) return jsonResp(tuningResp);
   if (u.includes('/api/songdb')) return jsonResp(songDB);
@@ -808,5 +816,91 @@ describe('regression smoke (search / device drawer / detPreview)', () => {
     items[0].click();
     expect(document.getElementById('song-id').value).toBe('325');
     expect(document.getElementById('sb-title').textContent).toBe('EXIST');
+  });
+});
+
+describe('per-device ROI calibration', () => {
+  // An earlier test switches the UI language, and the active locale leaks into
+  // these assertions, so accept either locale's wording for the new keys.
+  const ROI_BADGES = [enLocale['device.roi.calibrated'], zhTwLocale['device.roi.calibrated']];
+  const DEVICE_LABELS = [enLocale['song.debug.device'], zhTwLocale['song.debug.device']];
+  const detDeviceLabel = () => document.getElementById('det-device').textContent;
+
+  it('marks only the devices that have a calibration, with a reset control', async () => {
+    // The ROI is stored per device serial, so the settings list has to say
+    // which phones have one. Add a second, uncalibrated device to prove the
+    // badge is not drawn for every row.
+    devices.SECONDSERIAL = { width: 720, height: 1560 };
+    fetchCalls.length = 0;
+    setInput('#dc-s', 'TESTSERIAL'); setInput('#dc-w', '1080'); setInput('#dc-h', '2340');
+    click('[data-action="saveDevice"]'); // saveDevice reloads the list on success
+    await flush(); await flush();
+
+    expect(fetchCalls.some(([u]) => u.includes('/api/device-roi'))).toBe(true);
+
+    const rows = Array.from(document.querySelectorAll('#dev-list .dev-row'));
+    const calibrated = rows.find((r) => r.textContent.includes('TESTSERIAL'));
+    const plain = rows.find((r) => r.textContent.includes('SECONDSERIAL'));
+
+    expect(ROI_BADGES).toContain(calibrated.querySelector('.dev-roi').textContent);
+    expect(calibrated.querySelector('[data-action="resetDeviceROI"]').dataset.serial).toBe('TESTSERIAL');
+
+    expect(plain.querySelector('.dev-roi')).toBeNull();
+    expect(plain.querySelector('[data-action="resetDeviceROI"]')).toBeNull();
+
+    delete devices.SECONDSERIAL;
+  });
+
+  it('clears a device calibration through the dedicated endpoint', async () => {
+    fetchCalls.length = 0;
+    document.querySelector('#dev-list [data-action="resetDeviceROI"]').click();
+    await flush(); await flush();
+
+    const roiCalls = fetchCalls.filter(([u]) => u.includes('/api/device-roi'));
+    const deletes = roiCalls.filter(([, init]) => init && init.method === 'DELETE');
+    expect(deletes.length).toBe(1);
+    expect(JSON.parse(deletes[0][1].body)).toMatchObject({ serial: 'TESTSERIAL' });
+    // A successful reset reloads the list, so a GET follows the DELETE.
+    expect(roiCalls.filter(([, init]) => !init || !init.method).length).toBeGreaterThan(0);
+  });
+
+  it('shows which device the panel calibrates and reloads on a device swap', async () => {
+    // Opening the panel previews with the server-saved ROI and learns the
+    // device serial from the response.
+    detectSongResp = { matched: false, candidates: [], roi: [0.1, 0.1, 0.3, 0.1], serial: 'DEV_A', texts: [] };
+    document.getElementById('det-debug-btn').click();
+    await flush(); await flush();
+    expect(document.getElementById('det-debug').classList.contains('hidden')).toBe(false);
+    expect(DEVICE_LABELS.some((l) => detDeviceLabel() === l + 'DEV_A')).toBe(true);
+    expect(document.getElementById('det-x').value).toBe('0.1');
+
+    // Same device again: a drag saves as usual and triggers no reload, so the
+    // debounced slider edit stays a single detect request.
+    detectSongResp = { matched: false, candidates: [], roi: [0.15, 0.1, 0.3, 0.1], serial: 'DEV_A', texts: [] };
+    fetchCalls.length = 0;
+    setInput('#det-x', '0.15');
+    await flush(700); // scheduleDetectRefresh debounces by 500ms
+    const sameDevice = fetchCalls.map(([u]) => u).filter((u) => u.includes('/api/detect-song'));
+    expect(sameDevice.length).toBe(1);
+    expect(sameDevice[0]).toContain('roi=0.15,');
+    expect(sameDevice[0]).toContain('save=1');
+
+    // A different device answers. The sliders still hold DEV_A's crop, so they
+    // must be reloaded from the server — otherwise the next drag would write
+    // DEV_A's box onto DEV_B.
+    detectSongResp = { matched: false, candidates: [], roi: [0.25, 0.2, 0.3, 0.1], serial: 'DEV_B', texts: [] };
+    fetchCalls.length = 0;
+    setInput('#det-x', '0.3');
+    await flush(700); await flush(); await flush();
+
+    const detectCalls = fetchCalls.map(([u]) => u).filter((u) => u.includes('/api/detect-song'));
+    expect(detectCalls.length).toBe(2);
+    expect(detectCalls[0]).toContain('roi=0.3,');      // the user's drag
+    expect(detectCalls[1]).not.toContain('roi=');      // the server-side reload
+    expect(detectCalls[1]).not.toContain('save=1');
+
+    expect(DEVICE_LABELS.some((l) => detDeviceLabel() === l + 'DEV_B')).toBe(true);
+    // The reload put DEV_B's own calibration on the sliders.
+    expect(document.getElementById('det-x').value).toBe('0.25');
   });
 });

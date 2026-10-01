@@ -355,6 +355,50 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleDeviceROI exposes the per-device song-detection calibrations that
+// /api/detect-song stores:
+//
+//	GET    /api/device-roi                 -> {serial: {mode: [x,y,w,h]}}
+//	DELETE /api/device-roi {serial, mode?} -> clear that device's calibration
+//
+// An empty mode clears every mode of the device. This is a separate endpoint
+// on purpose: /api/device answers {serial: {width, height}} and that shape is
+// consumed by pickDetectDevice and the run/settings UI, so it must not change.
+func (s *Server) handleDeviceROI(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.conf.DeviceROIs())
+	case http.MethodDelete:
+		var body struct {
+			Serial string `json:"serial"`
+			Mode   string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if body.Serial == "" {
+			http.Error(w, "serial required", http.StatusBadRequest)
+			return
+		}
+		// A mode in the body selects one bucket; leaving it out means "all of
+		// this device's modes". NormalizeMode would fold "" into bang, so it is
+		// only applied when a mode was actually given.
+		mode := ""
+		if body.Mode != "" {
+			mode = common.NormalizeMode(body.Mode)
+		}
+		if err := s.conf.ClearDeviceROI(body.Serial, mode); err != nil {
+			http.Error(w, "persist config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // handleTuning reads and writes the GUI's fine-tuning panels (humanization
 // jitter + advanced parameters) so the user's tuning survives a restart.
 //
@@ -859,6 +903,7 @@ func (s *Server) Start() (string, error) {
 	mux.HandleFunc("/api/offset", s.handleOffset)
 	mux.HandleFunc("/api/restart", s.handleRestart)
 	mux.HandleFunc("/api/device", s.handleDevice)
+	mux.HandleFunc("/api/device-roi", s.handleDeviceROI)
 	mux.HandleFunc("/api/tuning", s.handleTuning)
 	mux.HandleFunc("/api/extract", s.handleExtract)
 	mux.HandleFunc("/api/songdb", s.handleSongDB)

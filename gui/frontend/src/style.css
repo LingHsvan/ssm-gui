@@ -907,6 +907,12 @@ input[type="number"]:focus {
   @apply font-mono text-xs text-ssm-muted ml-4;
 }
 
+/* Marks a device whose song-detection ROI has been calibrated. The crop is
+   stored per device serial, so this badge says "this phone has its own box". */
+.dev-roi {
+  @apply ml-3 px-2 py-0.5 rounded-md text-[10px] font-bold bg-ssm-blue-bg text-ssm-blue;
+}
+
 
 .btn-del {
 

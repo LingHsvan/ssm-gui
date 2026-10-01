@@ -47,8 +47,17 @@ type Config struct {
 	Devices map[string]*DeviceConfig `json:"devices"`
 
 	// SongDetectROI persists calibrated normalized [x,y,w,h] crops for the
-	// /api/detect-song endpoint, keyed by game mode ("bang"/"pjsk").
+	// /api/detect-song endpoint, keyed by game mode ("bang"/"pjsk"). It is the
+	// shared, device-agnostic fallback kept for configs written before the
+	// per-device map existed, and the landing bucket when no device could be
+	// resolved (e.g. detecting against a local test image).
 	SongDetectROI map[string][4]float64 `json:"songDetectROI,omitempty"`
+
+	// SongDetectROIDevice persists the same crops keyed by device serial and
+	// then game mode: SongDetectROIDevice[serial][mode]. Phones frame the title
+	// bar at different normalized positions, so a calibration only means
+	// anything for the device it was measured on.
+	SongDetectROIDevice map[string]map[string][4]float64 `json:"songDetectROIDevice,omitempty"`
 
 	// Jitter and Advanced persist the two GUI fine-tuning panels so tuning
 	// survives a restart. Advanced is keyed by game mode because each mode has
@@ -56,9 +65,9 @@ type Config struct {
 	Jitter   *JitterConfig              `json:"jitter,omitempty"`
 	Advanced map[string]*AdvancedConfig `json:"advanced,omitempty"`
 
-	// mu guards Devices and the on-disk file. The GUI mutates the device
-	// map from HTTP handler goroutines while playback may read it, so all
-	// access goes through the locked methods below.
+	// mu guards Devices, the song-detection ROI maps and the on-disk file. The
+	// GUI mutates these from HTTP handler goroutines while playback may read
+	// them, so all access goes through the locked methods below.
 	mu sync.Mutex `json:"-"`
 }
 
@@ -112,14 +121,18 @@ func (c *Config) SetDevice(serial string, width, height int) error {
 	return c.saveLocked()
 }
 
-// DeleteDevice removes a device entry and persists the config.
+// DeleteDevice removes a device entry along with its ROI calibrations and
+// persists the config. The ROI is dropped too so removing a phone cannot leave
+// an orphan bucket behind for a serial that will never be picked again.
 func (c *Config) DeleteDevice(serial string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.Devices == nil {
-		return nil
+	if c.Devices != nil {
+		delete(c.Devices, serial)
 	}
-	delete(c.Devices, serial)
+	if c.SongDetectROIDevice != nil {
+		delete(c.SongDetectROIDevice, serial)
+	}
 	return c.saveLocked()
 }
 
@@ -145,6 +158,105 @@ func (c *Config) RecordedSerials() map[string]struct{} {
 	out := make(map[string]struct{}, len(c.Devices))
 	for s := range c.Devices {
 		out[s] = struct{}{}
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────
+// Song-detection ROI calibration
+//
+// The ROI is the normalized [x,y,w,h] crop handed to OCR. It is genuinely
+// device-specific — the same game on two phones puts the title bar at
+// different places — so it is stored per device serial and then per game mode.
+// The shared mode-level map above stays as the fallback, so single-device
+// setups and configs written before per-device storage keep working unchanged.
+// ─────────────────────────────────────────────────────────────
+
+// SongDetectROIFor returns the calibration saved for this exact device and
+// mode. An empty serial never matches: it means "no device was resolved".
+func (c *Config) SongDetectROIFor(serial, mode string) ([4]float64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if serial == "" {
+		return [4]float64{}, false
+	}
+	bucket, ok := c.SongDetectROIDevice[serial]
+	if !ok {
+		return [4]float64{}, false
+	}
+	roi, ok := bucket[mode]
+	return roi, ok
+}
+
+// SongDetectROIMode returns the shared, device-agnostic calibration for a mode.
+func (c *Config) SongDetectROIMode(mode string) ([4]float64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	roi, ok := c.SongDetectROI[mode]
+	return roi, ok
+}
+
+// SetSongDetectROI stores a calibration for (serial, mode) and persists the
+// config. An empty serial — a local test image, or no device could be picked —
+// falls back to the shared mode-level bucket instead of inventing a device.
+func (c *Config) SetSongDetectROI(serial, mode string, roi [4]float64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if serial == "" {
+		if c.SongDetectROI == nil {
+			c.SongDetectROI = map[string][4]float64{}
+		}
+		c.SongDetectROI[mode] = roi
+		return c.saveLocked()
+	}
+
+	if c.SongDetectROIDevice == nil {
+		c.SongDetectROIDevice = map[string]map[string][4]float64{}
+	}
+	bucket := c.SongDetectROIDevice[serial]
+	if bucket == nil {
+		bucket = map[string][4]float64{}
+		c.SongDetectROIDevice[serial] = bucket
+	}
+	bucket[mode] = roi
+	return c.saveLocked()
+}
+
+// ClearDeviceROI drops the calibrations of one device; an empty mode clears
+// every mode of that device. Backs the settings page's "reset ROI" action.
+func (c *Config) ClearDeviceROI(serial, mode string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if serial == "" {
+		return nil
+	}
+	if mode == "" {
+		delete(c.SongDetectROIDevice, serial)
+	} else if bucket := c.SongDetectROIDevice[serial]; bucket != nil {
+		delete(bucket, mode)
+		if len(bucket) == 0 {
+			delete(c.SongDetectROIDevice, serial)
+		}
+	}
+	return c.saveLocked()
+}
+
+// DeviceROIs returns a deep copy of the per-device calibrations, safe to read
+// without the lock.
+func (c *Config) DeviceROIs() map[string]map[string][4]float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]map[string][4]float64, len(c.SongDetectROIDevice))
+	for serial, bucket := range c.SongDetectROIDevice {
+		if len(bucket) == 0 {
+			continue
+		}
+		cp := make(map[string][4]float64, len(bucket))
+		for mode, roi := range bucket {
+			cp[mode] = roi
+		}
+		out[serial] = cp
 	}
 	return out
 }
