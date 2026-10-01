@@ -65,6 +65,11 @@ type Config struct {
 	Jitter   *JitterConfig              `json:"jitter,omitempty"`
 	Advanced map[string]*AdvancedConfig `json:"advanced,omitempty"`
 
+	// AutoOpenBrowser controls whether starting the GUI also opens the default
+	// browser. Off by default — a missing key means off too — so a start stays
+	// quiet unless asked otherwise; the console always prints the URL.
+	AutoOpenBrowser bool `json:"autoOpenBrowser,omitempty"`
+
 	// mu guards Devices, the song-detection ROI maps and the on-disk file. The
 	// GUI mutates these from HTTP handler goroutines while playback may read
 	// them, so all access goes through the locked methods below.
@@ -300,6 +305,23 @@ func (c *Config) Tuning() (*JitterConfig, map[string]AdvancedConfig) {
 		}
 	}
 	return jitter, advanced
+}
+
+// ShouldAutoOpenBrowser reports whether launching the GUI should also open the
+// default browser. A config written before this setting existed simply leaves
+// the field false, which is the intended default.
+func (c *Config) ShouldAutoOpenBrowser() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.AutoOpenBrowser
+}
+
+// SetAutoOpenBrowser stores the startup preference and persists the config.
+func (c *Config) SetAutoOpenBrowser(open bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.AutoOpenBrowser = open
+	return c.saveLocked()
 }
 
 func Load(path string) (*Config, error) {

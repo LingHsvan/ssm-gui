@@ -440,6 +440,40 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleSettings reads and writes the GUI's startup preferences. It is kept
+// apart from /api/tuning because that endpoint is about event generation, not
+// application behaviour.
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"autoOpenBrowser": s.conf.ShouldAutoOpenBrowser(),
+		})
+	case http.MethodPost:
+		var body struct {
+			AutoOpenBrowser *bool `json:"autoOpenBrowser"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// The pointer distinguishes "field omitted" from an explicit false, so a
+		// malformed body cannot silently turn the setting off.
+		if body.AutoOpenBrowser == nil {
+			http.Error(w, "autoOpenBrowser required", http.StatusBadRequest)
+			return
+		}
+		if err := s.conf.SetAutoOpenBrowser(*body.AutoOpenBrowser); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleSongDB(w http.ResponseWriter, r *http.Request) {
 	mode := common.NormalizeMode(r.URL.Query().Get("mode"))
 	w.Header().Set("Content-Type", "application/json")
@@ -905,6 +939,7 @@ func (s *Server) Start() (string, error) {
 	mux.HandleFunc("/api/device", s.handleDevice)
 	mux.HandleFunc("/api/device-roi", s.handleDeviceROI)
 	mux.HandleFunc("/api/tuning", s.handleTuning)
+	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/extract", s.handleExtract)
 	mux.HandleFunc("/api/songdb", s.handleSongDB)
 	mux.HandleFunc("/api/ournotes-jacket", s.handleOurNotesJacket)

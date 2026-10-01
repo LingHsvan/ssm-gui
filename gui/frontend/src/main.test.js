@@ -67,6 +67,10 @@ let tuningResp = {
   },
 };
 
+// Persisted startup preference served by /api/settings. True so the restore
+// path is distinguishable from the built-in "off" default.
+let settingsResp = { autoOpenBrowser: true };
+
 function jsonResp(obj) {
   return Promise.resolve({
     ok: true,
@@ -86,6 +90,7 @@ function mockFetch(url, init) {
   if (u.includes('/api/device-roi')) return jsonResp(deviceRois);
   if (u.includes('/api/device')) return jsonResp(devices);
   if (u.includes('/api/tuning')) return jsonResp(tuningResp);
+  if (u.includes('/api/settings')) return jsonResp(settingsResp);
   if (u.includes('/api/songdb')) return jsonResp(songDB);
   if (u.includes('/api/detect-adb')) return jsonResp(detectAdbResp);
   if (u.includes('/api/detect-song')) return jsonResp(detectSongResp);
@@ -141,6 +146,13 @@ describe('init', () => {
     // The jitter slider and its readout came from the persisted panel.
     expect(document.getElementById('sld-timing').value).toBe('12');
     expect(document.getElementById('val-timing').textContent).toBe('±12 ms');
+  });
+
+  it('restores the persisted auto-open preference', () => {
+    expect(fetchCalls.some(([u]) => u.includes('/api/settings'))).toBe(true);
+    // The fixture is true, so the ON half must be the active one.
+    expect(document.getElementById('ao-on').classList.contains('active')).toBe(true);
+    expect(document.getElementById('ao-off').classList.contains('active')).toBe(false);
   });
 });
 
@@ -261,6 +273,20 @@ describe('tuning persistence', () => {
     expect(body.jitter).toMatchObject({ timing: 30 });
     expect(typeof body.advanced.flickFactor).toBe('number');
     expect(typeof body.advanced.flickLead).toBe('number');
+  });
+});
+
+describe('startup settings', () => {
+  it('writes a toggle back to /api/settings', async () => {
+    fetchCalls.length = 0;
+    click('[data-action="setAutoOpen"][data-arg="off"]');
+
+    expect(document.getElementById('ao-off').classList.contains('active')).toBe(true);
+    expect(document.getElementById('ao-on').classList.contains('active')).toBe(false);
+
+    const post = fetchCalls.find(([u, i]) => u.includes('/api/settings') && i && i.method === 'POST');
+    expect(post).toBeTruthy();
+    expect(JSON.parse(post[1].body)).toEqual({ autoOpenBrowser: false });
   });
 });
 

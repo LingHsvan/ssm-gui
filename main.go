@@ -261,7 +261,11 @@ func runGUI(conf *config.Config) {
 	fmt.Printf("\n  SSM GUI started\n")
 	fmt.Printf("   Open this URL in your browser: %s\n\n", addr)
 
-	openBrowser(addr)
+	// Off by default: the URL above is the entry point, and the setting is a
+	// convenience for users who want the browser to come up on its own.
+	if conf.ShouldAutoOpenBrowser() {
+		openBrowser(addr)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

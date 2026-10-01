@@ -286,6 +286,33 @@ function loadTuning() {
   }).then(function () { _tuningLoaded = true; });
 }
 
+// ══ startup settings ══════════════════════════════════════
+// "Auto-open page on start" lives in config.json and is read back on every
+// load, so the button always shows what the next launch will do.
+function renderAutoOpen(on) {
+  const off = document.getElementById('ao-off'), el = document.getElementById('ao-on');
+  if (off) off.classList.toggle('active', !on);
+  if (el) el.classList.toggle('active', on);
+}
+
+function loadSettings() {
+  fetch('/api/settings').then(function (r) { return r.json(); }).then(function (d) {
+    renderAutoOpen(!!(d && d.autoOpenBrowser));
+  }).catch(function () {
+    // A failed read means "not persisted yet": the default is OFF.
+    renderAutoOpen(false);
+  });
+}
+
+function setAutoOpen(on) {
+  renderAutoOpen(on);
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ autoOpenBrowser: on }),
+  });
+}
+
 // ══ state ══════════════════════════════════════════════════
 const S = { backend: 'adb', diff: 3, orient: 'left', mode: 'bang', state: 0, offset: 0, songId: 0, songData: null, db: null, dropIdx: -1, _lastLogState: -1, _lastGreatSig: '' };
 const DN_BANG = ['easy', 'normal', 'hard', 'expert', 'special'];
@@ -1390,6 +1417,7 @@ updateDiffLabels();
 resetAdvanced();
 loadDevices();
 loadTuning();
+loadSettings();
 // Warm the song DB at startup so song search and Detect Song have titles
 // available immediately (backend serves it from local cache).
 loadDB(function () {});
@@ -1412,6 +1440,7 @@ const ACTIONS = {
   adj: function (arg) { adj(parseInt(arg)); },
   onJitter: function (arg) { onJitter(arg); },
   onAdvanced: function (arg) { onAdvanced(arg); },
+  setAutoOpen: function (arg) { setAutoOpen(arg === 'on'); },
   langSelect: function (arg) { I18n.select(arg); },
   selSong: function (arg) { selSong(parseInt(arg)); },
   selectDevSerial: function (arg, el) { selectDevSerial(el.dataset.serial); },

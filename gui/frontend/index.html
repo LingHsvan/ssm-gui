@@ -254,6 +254,22 @@
       <div class="pane" id="pane-settings">
         <div class="pg-title" data-i18n="nav.settings">Settings</div>
         <div class="card">
+          <div class="ct" data-i18n="settings.startup">Startup</div>
+          <div class="jitter-row">
+            <span class="jitter-label" data-i18n="settings.autoOpen">Auto-open page on start</span>
+            <div class="grid grid-cols-2 gap-3 flex-1">
+              <button class="bc active !p-2" id="ao-off" data-action="setAutoOpen" data-arg="off">
+                <div class="bcs !text-xs !font-bold">OFF</div>
+              </button>
+              <button class="bc !p-2" id="ao-on" data-action="setAutoOpen" data-arg="on">
+                <div class="bcs !text-xs !font-bold">ON</div>
+              </button>
+            </div>
+          </div>
+          <div class="text-[11px] text-ssm-hint" data-i18n="settings.autoOpen.hint"></div>
+        </div>
+
+        <div class="card">
           <div class="ct" data-i18n="settings.device">Device Management</div>
           <div id="dev-list">
             <div style="font-size:12px;color:var(--color-ssm-hint)" data-i18n="device.loading">Loading...</div>
