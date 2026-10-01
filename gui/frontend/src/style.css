@@ -512,6 +512,10 @@ html[data-theme='light'] .ins-label {
   color: #1a1a1a;
 }
 
+html[data-theme='light'] .ins-group {
+  color: #1a1a1a;
+}
+
 html[data-theme='light'] .ins-group-hints {
   display: flex;
   width: 100%;

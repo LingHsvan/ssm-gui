@@ -923,11 +923,24 @@ function setImageWithFallback(imgEl, urls) {
 }
 
 // ══ keyboard ═══════════════════════════════════════════════
+// Double-pressing Backspace re-arms the current song (restart). A held key
+// fires repeated keydown events, so e.repeat is filtered out and only two
+// distinct presses within RESTART_DOUBLE_PRESS_MS count.
+const RESTART_DOUBLE_PRESS_MS = 500;
+let _bsLastPress = 0;
 document.addEventListener('keydown', function (e) {
   if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
   if (!document.getElementById('pane-play').classList.contains('active')) return;
   switch (e.key) {
     case 'Enter': case ' ': e.preventDefault(); apiStart(); break;
+    case 'Backspace': {
+      e.preventDefault();
+      if (e.repeat) break;
+      const now = Date.now();
+      if (now - _bsLastPress <= RESTART_DOUBLE_PRESS_MS) { _bsLastPress = 0; apiRestart(); }
+      else { _bsLastPress = now; }
+      break;
+    }
     case 'ArrowLeft': e.preventDefault(); adj(e.ctrlKey || e.metaKey ? -100 : e.shiftKey ? -50 : -10); break;
     case 'ArrowRight': e.preventDefault(); adj(e.ctrlKey || e.metaKey ? 100 : e.shiftKey ? 50 : 10); break;
   }

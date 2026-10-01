@@ -370,6 +370,85 @@ describe('restart flow (re-arms the same song, no re-load)', () => {
   });
 });
 
+describe('Backspace double-press restarts playback (keyboard mapping)', () => {
+  // The double-press window is a module-level timestamp, so each test moves
+  // the mocked clock far ahead of the previous test's presses: no state leaks.
+  let clockBase = 1e15;
+  const nextClock = () => { clockBase += 1_000_000; vi.setSystemTime(clockBase); };
+  const restartCalls = () => fetchCalls.filter(([u]) => u.includes('/api/restart')).length;
+  const pressBackspace = (init) => document.body.dispatchEvent(
+    new window.KeyboardEvent('keydown', Object.assign({ key: 'Backspace', bubbles: true }, init)));
+  const onPlayPane = () => {
+    click('#nav-play');
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  };
+
+  it('restarts on the second press, not on a lone one', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      nextClock(); onPlayPane(); fetchCalls.length = 0;
+      pressBackspace();
+      expect(restartCalls()).toBe(0);
+      vi.setSystemTime(clockBase + 200);
+      pressBackspace();
+      expect(restartCalls()).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not restart when the presses are more than 500 ms apart', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      nextClock(); onPlayPane(); fetchCalls.length = 0;
+      pressBackspace();
+      vi.setSystemTime(clockBase + 600);
+      pressBackspace(); // too slow — this one only arms the next pair
+      expect(restartCalls()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('ignores auto-repeat so holding the key never restarts', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      nextClock(); onPlayPane(); fetchCalls.length = 0;
+      pressBackspace();
+      pressBackspace({ repeat: true });
+      pressBackspace({ repeat: true });
+      expect(restartCalls()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('stays inert while typing and outside the play pane', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      nextClock(); onPlayPane(); fetchCalls.length = 0;
+
+      document.getElementById('song-id').focus(); // typing: Backspace edits text
+      pressBackspace();
+      vi.setSystemTime(clockBase + 100);
+      pressBackspace();
+      expect(restartCalls()).toBe(0);
+
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      click('#nav-song'); // play pane no longer active
+      pressBackspace();
+      vi.setSystemTime(clockBase + 200);
+      pressBackspace();
+      expect(restartCalls()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('keyboard hint row', () => {
+  it('shows one Backspace keycap with ×2 and a RESTART label styled like PLAY', () => {
+    const group = document.querySelector('.pd-actions-sec .ins-group');
+    // One keycap per real key: "Backspace Backspace" looked like duplicated text.
+    expect(Array.from(group.querySelectorAll('kbd')).map((k) => k.textContent)).toEqual(['Enter', 'Space', 'Backspace']);
+    expect(group.textContent.replace(/\s+/g, ' ')).toContain('×2');
+    // Both shortcut labels share the same .ins-label style.
+    expect(Array.from(group.querySelectorAll('.ins-label')).map((el) => el.textContent.trim())).toEqual(['PLAY', 'RESTART']);
+  });
+});
+
 describe('API actions', () => {
   it('submits a run for the selected, configured device', async () => {
     setInput('#dev-serial', 'TESTSERIAL');
