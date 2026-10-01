@@ -21,6 +21,7 @@ func httpGetJson(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -36,18 +37,21 @@ func httpGetJson(url string) ([]byte, error) {
 }
 
 func loadFromFileOrUrlAndSave(path string, url string) ([]byte, error) {
-	if data, err := httpGetJson(url); err == nil {
-		if localData, localErr := os.ReadFile(path); localErr != nil || !bytes.Equal(localData, data) {
-			if writeErr := os.WriteFile(path, data, 0o644); writeErr == nil {
-				return data, nil
-			}
-		} else {
-			return data, nil
-		}
-	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			data, err = httpGetJson(url)
+			if err != nil {
+				return nil, err
+			}
+
+			err = os.WriteFile(path, data, 0o644)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 	return data, nil
 }

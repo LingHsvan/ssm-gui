@@ -206,13 +206,16 @@ var (
 )
 
 // loadLocalFirst prefers the on-disk cache so detection latency never waits
-// on the network; the cache is refreshed in the background instead.
+// on the network; the cache is refreshed in the background instead. The
+// fetching side is upstream's cachedSource, so the 30s timeout, the JSON
+// validation and the atomic cache write are shared with /api/songdb.
 func loadLocalFirst(localPath, url string) ([]byte, error) {
+	src := cachedSource{localPath, url}
 	if data, err := os.ReadFile(localPath); err == nil && len(data) > 0 {
-		go func() { _, _ = fetchOrLoad(localPath, url) }()
+		go func() { _, _ = src.load() }()
 		return data, nil
 	}
-	return fetchOrLoad(localPath, url)
+	return src.load()
 }
 
 func loadSongCandidates(mode string) ([]songCandidate, error) {
@@ -396,8 +399,8 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		plan.source = "test"
 	} else {
 		s.mu.Lock()
-		ctrl := s.controller
-		st := s.state
+		ctrl := s.song.controller
+		st := s.status.State
 		s.mu.Unlock()
 
 		// A live scrcpy session already knows its device, so no adb round trip
@@ -782,25 +785,21 @@ func (d *detectDeviceSession) Close() {
 // sits armed while matchmaking and needs re-detection, so the stale chart is
 // discarded and re-armed via a fresh Load.
 func (s *Server) releaseHIDForDetect(ctrl controllers.Controller) bool {
-	hid, isHID := ctrl.(*controllers.HIDController)
-	if !isHID || hid == nil {
+	hid := hidControllerOf(ctrl)
+	if hid == nil {
 		return false
 	}
 	_ = hid.Close()
 	s.mu.Lock()
-	s.controller = nil
-	if s.state == StateDone || s.state == StateReady {
-		if s.state == StateReady {
-			select {
-			case <-s.stopCh:
-			default:
-				close(s.stopCh)
-			}
+	s.song.controller = nil
+	if s.status.State == StateDone || s.status.State == StateReady {
+		if s.status.State == StateReady {
+			s.song.interrupt()
 		}
-		s.state = StateIdle
+		s.status.State = StateIdle
 	}
+	s.publishLocked()
 	s.mu.Unlock()
-	s.broadcastState()
 	return true
 }
 
@@ -813,8 +812,8 @@ func (s *Server) stopAdbServerIfSafe(startedByUs bool) {
 		return
 	}
 	s.mu.Lock()
-	st := s.state
-	ctrl := s.controller
+	st := s.status.State
+	ctrl := s.song.controller
 	s.mu.Unlock()
 	if st != StateIdle {
 		return

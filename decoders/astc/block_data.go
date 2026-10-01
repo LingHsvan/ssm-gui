@@ -942,7 +942,7 @@ func (bd *BlockData) ApplicateColor(out []byte) {
 		ps := []int{0, 0, 0, 0}
 		ps[bd.PlaneSelector] = 1
 		if bd.PartCount > 1 {
-			for i := range bd.BlockWidth * bd.BlockHeight {
+			for i := range bd.BlockWidth*bd.BlockHeight {
 				p := bd.Partition[i]
 				r := funcTableC[bd.Cem[p]](bd.Endpoints[p][0], bd.Endpoints[p][4], bd.Weights[i][ps[0]])
 				g := funcTableC[bd.Cem[p]](bd.Endpoints[p][1], bd.Endpoints[p][5], bd.Weights[i][ps[1]])
@@ -954,7 +954,7 @@ func (bd *BlockData) ApplicateColor(out []byte) {
 				out[i*4+3] = a
 			}
 		} else {
-			for i := range bd.BlockWidth * bd.BlockHeight {
+			for i := range bd.BlockWidth*bd.BlockHeight {
 				r := funcTableC[bd.Cem[0]](bd.Endpoints[0][0], bd.Endpoints[0][4], bd.Weights[i][ps[0]])
 				g := funcTableC[bd.Cem[0]](bd.Endpoints[0][1], bd.Endpoints[0][5], bd.Weights[i][ps[1]])
 				b := funcTableC[bd.Cem[0]](bd.Endpoints[0][2], bd.Endpoints[0][6], bd.Weights[i][ps[2]])
@@ -966,7 +966,7 @@ func (bd *BlockData) ApplicateColor(out []byte) {
 			}
 		}
 	} else if bd.PartCount > 1 {
-		for i := range bd.BlockWidth * bd.BlockHeight {
+		for i := range bd.BlockWidth*bd.BlockHeight {
 			p := bd.Partition[i]
 			r := funcTableC[bd.Cem[p]](bd.Endpoints[p][0], bd.Endpoints[p][4], bd.Weights[i][0])
 			g := funcTableC[bd.Cem[p]](bd.Endpoints[p][1], bd.Endpoints[p][5], bd.Weights[i][0])
@@ -978,7 +978,7 @@ func (bd *BlockData) ApplicateColor(out []byte) {
 			out[i*4+3] = a
 		}
 	} else {
-		for i := range bd.BlockWidth * bd.BlockHeight {
+		for i := range bd.BlockWidth*bd.BlockHeight {
 			r := funcTableC[bd.Cem[0]](bd.Endpoints[0][0], bd.Endpoints[0][4], bd.Weights[i][0])
 			g := funcTableC[bd.Cem[0]](bd.Endpoints[0][1], bd.Endpoints[0][5], bd.Weights[i][0])
 			b := funcTableC[bd.Cem[0]](bd.Endpoints[0][2], bd.Endpoints[0][6], bd.Weights[i][0])
