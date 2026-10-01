@@ -1075,7 +1075,11 @@ function detUpdateOverlay() {
 // OCR/crop refresh is debounced until the drag settles.
 function scheduleDetectRefresh() {
   if (detRefreshTimer) clearTimeout(detRefreshTimer);
-  detRefreshTimer = setTimeout(function () { detectPreview(); }, 500);
+  // Persist what the panel previews: "识别歌曲" only sends the mode, so the
+  // server crops with the *saved* ROI. Without the save, tuning the sliders and
+  // seeing a hit here still left the button on the old crop ("调试里识别到了，
+  // 点识别歌曲还是未匹配").
+  detRefreshTimer = setTimeout(function () { detectPreview(true); }, 500);
 }
 
 function detRoiFromSliders() {

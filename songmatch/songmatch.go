@@ -41,6 +41,9 @@ var nonWordRE = regexp.MustCompile(`[\s\p{P}\p{S}]+`)
 // case. Folding both the OCR text and the song titles through the same table
 // makes such pairs compare equal; it only ever produces more (weaker)
 // candidates, never a wrong confident match.
+//
+// Keep in sync with the CONFUSABLE list of gui/frontend/scripts/gen-hanzi-fold.mjs,
+// which feeds the same folds into the search box via src/hanzi-fold.js.
 var confusableFold = map[rune]rune{
 	'ハ': '八', // katakana ha vs. kanji eight
 	'ニ': '二', // katakana ni vs. kanji two
@@ -54,6 +57,13 @@ var confusableFold = map[rune]rune{
 	'オ': '才', // katakana o vs. kanji talent
 	'ミ': '三', // katakana mi vs. kanji three
 	'チ': '千', // katakana chi vs. kanji thousand
+	// Roman numeral I, lowercase L and digit 1 are the same glyph in most UI
+	// fonts and the OCR mixes them freely: #100034「Symbol II : 🜁」comes back as
+	// 「Symbol?Il?:△」. Unfolded that reading is one character *longer* than the
+	// title, so「Symbol I : △」(#100033) won a "contains" hit (92) while the
+	// correct near-equal「Symbol II」dropped to 74. Folding restores the equality.
+	'l': 'i',
+	'1': 'i',
 }
 
 // FoldConfusables replaces OCR-confusable characters with their canonical
@@ -163,9 +173,21 @@ func Score(query, title string) int {
 // Rank scores every candidate against every OCR text and returns the best
 // match plus the top list (at most maxCandidates entries, sorted by score
 // desc then song id asc for determinism).
+//
+// The texts concatenated in the given (reading) order are scored as one extra
+// query: the detector happily splits a short title into several boxes, and then
+// no single box covers enough of the title to score. #100039「Choir ‘S’ Choir」
+// comes back as ["Choir","s","Choir"], where "Choir" alone is under the
+// containment ratio (5/11) and scores nothing — the reading-order join is an
+// exact match. Callers must therefore pass the texts in reading order; gui
+// sorts the boxes before calling.
 func Rank(texts []string, cands []SongCandidate) (best Match, top []Match) {
+	queries := texts
+	if joined := joinTexts(texts); joined != "" {
+		queries = append(append(make([]string, 0, len(texts)+1), texts...), joined)
+	}
 	topBySong := map[int]Match{}
-	for _, text := range texts {
+	for _, text := range queries {
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
@@ -201,6 +223,19 @@ func Rank(texts []string, cands []SongCandidate) (best Match, top []Match) {
 		best = list[0]
 	}
 	return best, list
+}
+
+// joinTexts concatenates the OCR texts in reading order, or returns "" when
+// there is nothing to join (a single text is already scored on its own).
+func joinTexts(texts []string) string {
+	if len(texts) < 2 {
+		return ""
+	}
+	var b strings.Builder
+	for _, t := range texts {
+		b.WriteString(strings.TrimSpace(t))
+	}
+	return b.String()
 }
 
 // Detect ranks the OCR texts against the candidates and reports whether the

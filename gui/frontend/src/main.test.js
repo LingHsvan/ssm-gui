@@ -778,6 +778,19 @@ describe('regression smoke (search / device drawer / detPreview)', () => {
     expect(info).toContain('ocr text');
   });
 
+  it('tuning the debug ROI sliders persists it, so Detect Song crops the same box', async () => {
+    // "识别歌曲" only sends the mode; the server crops with the *saved* ROI.
+    // Dragging a slider must therefore save, otherwise the panel can show a hit
+    // while the button still uses the previous crop.
+    fetchCalls.length = 0;
+    setInput('#det-x', '0.15');
+    await flush(700); // scheduleDetectRefresh debounces by 500ms
+    const detectCalls = fetchCalls.map(([u]) => u).filter((u) => u.includes('/api/detect-song'));
+    expect(detectCalls.length).toBeGreaterThan(0);
+    expect(detectCalls[detectCalls.length - 1]).toContain('roi=0.15,');
+    expect(detectCalls[detectCalls.length - 1]).toContain('save=1');
+  });
+
   it('device drawer still lists the saved devices', async () => {
     document.getElementById('btn-dev-drop').click();
     await flush();

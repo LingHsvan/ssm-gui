@@ -22,10 +22,15 @@ const ST_URL = 'https://raw.githubusercontent.com/BYVoid/OpenCC/master/data/dict
 const JP_URL = 'https://raw.githubusercontent.com/BYVoid/OpenCC/master/data/dictionary/JPShinjitaiCharacters.txt';
 
 // Keep in sync with songmatch.FoldConfusables (songmatch/songmatch.go,
-// var confusableFold) — katakana glyphs OCR often misreads as kanji.
+// var confusableFold) — glyphs OCR often misreads, folded on both sides.
 const CONFUSABLE = [
   ['ハ', '八'], ['ニ', '二'], ['ー', '一'], ['ロ', '口'], ['カ', '力'], ['タ', '夕'],
   ['ト', '卜'], ['エ', '工'], ['オ', '才'], ['ミ', '三'], ['チ', '千'], ['ク', '夕'],
+  // Roman numeral I / lowercase L / digit 1: one glyph in most UI fonts.
+  // #100034「Symbol II : 🜁」is read as「Symbol?Il?:△」, and without the fold the
+  // reading is one character longer than the title, so「Symbol I : △」(#100033)
+  // wins as a "contains" hit while the correct near-equal title loses.
+  ['l', 'i'], ['1', 'i'],
 ];
 
 // Variant pairs the OpenCC character dictionaries do not connect, but which do

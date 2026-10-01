@@ -11,14 +11,17 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	ocr "github.com/getcharzp/go-ocr"
+	xdraw "golang.org/x/image/draw"
 
 	"github.com/kvarenzn/ssm/adb"
 	"github.com/kvarenzn/ssm/common"
@@ -32,6 +35,12 @@ import (
 // ─────────────────────────────────────────────────────────────
 // Song OCR engine (lazy singleton)
 // ─────────────────────────────────────────────────────────────
+
+// detMaxSideLen is the long-side budget handed to the OCR engine's detector.
+// Keep it in sync with the Config passed to NewPaddleOcrEngine below: the
+// detector resizes the long side to exactly this, and detInputSize() has to
+// predict that resize.
+const detMaxSideLen = 960
 
 var (
 	ocrMu       sync.Mutex
@@ -109,7 +118,7 @@ func getOCREngine() (ocr.Engine, error) {
 			DetModelPath:       paths.det,
 			RecModelPath:       paths.rec,
 			DictPath:           paths.dict,
-			DetMaxSideLen:      480,
+			DetMaxSideLen:      detMaxSideLen,
 			NumThreads:         2,
 		})
 		if err != nil {
@@ -140,6 +149,7 @@ func ocrImageTextsImage(img image.Image) ([]string, time.Duration, error) {
 		return nil, 0, err
 	}
 	elapsed := time.Since(start)
+	sortReadingOrder(results)
 	texts := make([]string, 0, len(results))
 	for _, r := range results {
 		t := strings.TrimSpace(r.Text)
@@ -148,6 +158,37 @@ func ocrImageTextsImage(img image.Image) ([]string, time.Duration, error) {
 		}
 	}
 	return texts, elapsed, nil
+}
+
+// sortReadingOrder orders OCR results the way a human reads them: top to
+// bottom, then left to right. The engine returns the boxes in heatmap-discovery
+// order, not geometric order, and songmatch.Rank scores their concatenation —
+// which only helps when they are in reading order. #100039「Choir ‘S’ Choir」
+// came back as ["s","Choir","Choir"], and the join has to read「choirschoir」
+// to equal the title.
+func sortReadingOrder(results []ocr.RecResult) {
+	if len(results) < 2 {
+		return
+	}
+	heights := make([]int, 0, len(results))
+	for _, r := range results {
+		heights = append(heights, r.Box[3]-r.Box[1])
+	}
+	sort.Ints(heights)
+	// Boxes whose vertical centres are within half a line height belong to the
+	// same line and are ordered by x instead.
+	tolerance := heights[len(heights)/2] / 2
+	if tolerance < 1 {
+		tolerance = 1
+	}
+	midY := func(b [4]int) int { return (b[1] + b[3]) / 2 }
+	sort.SliceStable(results, func(i, j int) bool {
+		yi, yj := midY(results[i].Box), midY(results[j].Box)
+		if yi-yj > tolerance || yj-yi > tolerance {
+			return yi < yj
+		}
+		return results[i].Box[0] < results[j].Box[0]
+	})
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -190,7 +231,9 @@ func loadSongCandidates(mode string) ([]songCandidate, error) {
 			return nil, err
 		}
 		for _, s := range notesDB.Songs() {
-			titles := uniqueNonEmpty([]string{s.Title, s.Phonetic})
+			// Every localisation: the pre-live screen draws the Japanese
+			// title while songs.json's `title` is the simplified-Chinese one.
+			titles := s.SearchTitles()
 			if s.ID > 0 && len(titles) > 0 {
 				out = append(out, songCandidate{SongID: s.ID, Titles: titles})
 			}
@@ -269,9 +312,12 @@ func uniqueNonEmpty(in []string) []string {
 // ─────────────────────────────────────────────────────────────
 
 var defaultSongROI = map[string][4]float64{
-	"bang":     {0.28, 0.05, 0.45, 0.18},
-	"pjsk":     {0.28, 0.05, 0.45, 0.18},
-	"ournotes": {0.28, 0.05, 0.45, 0.18}, // unverified; calibrate via Detect Song
+	"bang": {0.28, 0.05, 0.45, 0.18},
+	"pjsk": {0.28, 0.05, 0.45, 0.18},
+	// Our Notes draws the song title as a strip in the bottom-left corner of
+	// the pre-live screen ("乐队确认"), not at the top centre like the other two
+	// games. Measured from a real 2608x1200 frame; recalibrate via Detect Song.
+	"ournotes": {0.15, 0.81, 0.36, 0.08},
 }
 
 func parseROIParam(s string) ([4]float64, bool) {
@@ -323,27 +369,36 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── 1. source image ──
-	t0 := time.Now()
-	var srcImg *image.Gray
-	var fullGray *image.Gray
-	source := "test"
-	transport := "test"
-	screencapMs := 0.0
-	hidReleased := false
-	if testPath := q.Get("test"); testPath != "" {
-		data, err := os.ReadFile(testPath)
-		if err != nil {
-			http.Error(w, "test image: "+err.Error(), http.StatusBadRequest)
-			return
+	// A one-shot capture can land while the game is still drawing the title bar
+	// — the strip wipes in from the left, and the frame that produced
+	// "OCR 文本: [Mas?u]" was taken ~20% through「Mas?uerade Rhapsody Re?uest」
+	// (cropping the real strip to 16% reproduces exactly that reading). Nothing
+	// is wrong with the OCR there, and no matcher can recover a title that was
+	// never on screen, so when the capture is unusable we take another one.
+	type captureOut struct {
+		crop        *image.Gray
+		full        *image.Gray
+		source      string
+		transport   string
+		screencapMs float64
+		hidReleased bool
+	}
+	capture := func() (captureOut, int, string) {
+		out := captureOut{source: "test", transport: "test"}
+		if testPath := q.Get("test"); testPath != "" {
+			data, err := os.ReadFile(testPath)
+			if err != nil {
+				return out, http.StatusBadRequest, "test image: " + err.Error()
+			}
+			img, _, err := image.Decode(strings.NewReader(string(data)))
+			if err != nil {
+				return out, http.StatusBadRequest, "decode test image: " + err.Error()
+			}
+			out.crop = imageToGray(img)
+			out.full = out.crop
+			return out, 0, ""
 		}
-		img, _, err := image.Decode(strings.NewReader(string(data)))
-		if err != nil {
-			http.Error(w, "decode test image: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		srcImg = imageToGray(img)
-		fullGray = srcImg
-	} else {
+
 		s.mu.Lock()
 		ctrl := s.controller
 		s.mu.Unlock()
@@ -355,98 +410,138 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 		}
 		if frameOK {
 			gray := &image.Gray{Pix: frame.Plane0, Stride: frame.Width, Rect: image.Rect(0, 0, frame.Width, frame.Height)}
-			srcImg = cropGray(gray, roi)
-			fullGray = gray
-			source = "scrcpy"
-		} else {
-			// HID backend or not armed: take a one-shot adb screencap. The adb
-			// server must be alive only for this call (it fights libusb for
-			// the ADB interface HID needs), so it is stopped again right after.
+			out.crop = cropGray(gray, roi)
+			out.full = gray
+			out.source = "scrcpy"
+			return out, 0, ""
+		}
+
+		// HID backend or not armed: take a one-shot adb screencap. The adb
+		// server must be alive only for this call (it fights libusb for the
+		// ADB interface HID needs), so it is stopped again right after.
+		s.mu.Lock()
+		st := s.state
+		armed := s.controller
+		s.mu.Unlock()
+		if st == StatePlaying {
+			return out, http.StatusConflict, `{"error":"playback in progress; detect after it ends"}`
+		}
+		if hid, isHID := armed.(*controllers.HIDController); isHID && hid != nil {
+			// The open libusb handle holds the WinUSB interface, which makes
+			// adb blind to the device. Release it for the capture. This also
+			// covers the Ready state: in multiplayer the user sits armed while
+			// matchmaking and needs re-detection — the stale chart is discarded
+			// and re-armed via a fresh Load.
+			_ = hid.Close()
 			s.mu.Lock()
-			st := s.state
-			armed := s.controller
-			s.mu.Unlock()
-			if st == StatePlaying {
-				http.Error(w, `{"error":"playback in progress; detect after it ends"}`, http.StatusConflict)
-				return
-			}
-			if hid, isHID := armed.(*controllers.HIDController); isHID && hid != nil {
-				// The open libusb handle holds the WinUSB interface, which
-				// makes adb blind to the device. Release it for the capture.
-				// This also covers the Ready state: in multiplayer the user
-				// sits armed while matchmaking and needs re-detection — the
-				// stale chart is discarded and re-armed via a fresh Load.
-				_ = hid.Close()
-				s.mu.Lock()
-				s.controller = nil
-				if s.state == StateDone || s.state == StateReady {
-					if s.state == StateReady {
-						select {
-						case <-s.stopCh:
-						default:
-							close(s.stopCh)
-						}
+			s.controller = nil
+			if s.state == StateDone || s.state == StateReady {
+				if s.state == StateReady {
+					select {
+					case <-s.stopCh:
+					default:
+						close(s.stopCh)
 					}
-					s.state = StateIdle
 				}
-				s.mu.Unlock()
-				s.broadcastState()
-				hidReleased = true
+				s.state = StateIdle
 			}
-			pngBytes, capDur, via, capErr := s.adbScreencapForDetect(q.Get("serial"))
-			if capErr != nil {
-				http.Error(w, `{"error":"`+capErr.Error()+`"}`, http.StatusConflict)
-				return
-			}
-			screencapMs = capDur.Seconds() * 1000
-			transport = via
-			img, _, err := image.Decode(bytes.NewReader(pngBytes))
-			if err != nil {
-				http.Error(w, `{"error":"decode screencap: `+err.Error()+`"}`, http.StatusInternalServerError)
-				return
-			}
-			fullGray = imageToGray(img)
-			srcImg = cropGray(fullGray, roi)
-			source = "screencap"
+			s.mu.Unlock()
+			s.broadcastState()
+			out.hidReleased = true
 		}
-	}
-	if srcImg == nil {
-		dfw, dfh := 0, 0
-		if fullGray != nil {
-			dfw, dfh = fullGray.Bounds().Dx(), fullGray.Bounds().Dy()
+		pngBytes, capDur, via, capErr := s.adbScreencapForDetect(q.Get("serial"))
+		if capErr != nil {
+			return out, http.StatusConflict, `{"error":"` + capErr.Error() + `"}`
 		}
-		http.Error(w, fmt.Sprintf(`{"error":"empty crop: frame %dx%d, roi %v (config %v default %v) -> pw=%d ph=%d; adjust roi"}`,
-			dfw, dfh, roi, s.conf.SongDetectROI, defaultSongROI[mode],
-			int(clampf(roi[2], 0, 1)*float64(dfw)), int(clampf(roi[3], 0, 1)*float64(dfh))), http.StatusBadRequest)
-		return
+		out.screencapMs = capDur.Seconds() * 1000
+		out.transport = via
+		img, _, err := image.Decode(bytes.NewReader(pngBytes))
+		if err != nil {
+			return out, http.StatusInternalServerError, `{"error":"decode screencap: ` + err.Error() + `"}`
+		}
+		out.full = imageToGray(img)
+		out.crop = cropGray(out.full, roi)
+		out.source = "screencap"
+		return out, 0, ""
 	}
-	// frameMs covers decode+crop only; screencapMs is reported separately.
-	frameMs := time.Since(t0).Seconds()*1000 - screencapMs
 
-	// ── 2. OCR ──
-	texts, ocrDur, err := ocrImageTextsImage(srcImg)
-	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-		return
-	}
-	ocrMs := ocrDur.Seconds() * 1000
-
-	// ── 3. match ──
-	t2 := time.Now()
 	cands, err := loadSongCandidates(mode)
 	if err != nil {
 		http.Error(w, `{"error":"load song db: `+err.Error()+`"}`, http.StatusBadGateway)
 		return
 	}
-	best, top, confident := songmatch.Detect(texts, cands, threshold)
-	matchMs := time.Since(t2).Seconds() * 1000
+
+	const detectAttempts = 2
+	var (
+		out         captureOut
+		texts       []string
+		best        songmatch.Match
+		top         []songmatch.Match
+		confident   bool
+		blank       bool
+		attempts    int
+		screencapMs float64
+		frameMs     float64
+		ocrMs       float64
+		matchMs     float64
+	)
+	for attempts = 1; attempts <= detectAttempts; attempts++ {
+		t0 := time.Now()
+		var status int
+		var msg string
+		out, status, msg = capture()
+		if status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+		if out.crop == nil {
+			dfw, dfh := 0, 0
+			if out.full != nil {
+				dfw, dfh = out.full.Bounds().Dx(), out.full.Bounds().Dy()
+			}
+			http.Error(w, fmt.Sprintf(`{"error":"empty crop: frame %dx%d, roi %v (config %v default %v) -> pw=%d ph=%d; adjust roi"}`,
+				dfw, dfh, roi, s.conf.SongDetectROI, defaultSongROI[mode],
+				int(clampf(roi[2], 0, 1)*float64(dfw)), int(clampf(roi[3], 0, 1)*float64(dfh))), http.StatusBadRequest)
+			return
+		}
+		// frameMs covers decode+crop only; screencapMs is reported separately.
+		screencapMs += out.screencapMs
+		frameMs += time.Since(t0).Seconds()*1000 - out.screencapMs
+
+		// ── 2. OCR ──
+		// Feed the engine an image it will not resize any further: its detector
+		// floors the short side to a multiple of 32, which mangles thin strips
+		// (see detInputSize). out.crop stays the raw crop for the debug preview
+		// and the blank-frame heuristic.
+		ocrW, ocrH := detInputSize(out.crop.Bounds().Dx(), out.crop.Bounds().Dy())
+		texts, dur, err := ocrImageTextsImage(resampleGray(out.crop, ocrW, ocrH))
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		ocrMs += dur.Seconds() * 1000
+
+		// ── 3. match ──
+		t2 := time.Now()
+		best, top, confident = songmatch.Detect(texts, cands, threshold)
+		matchMs += time.Since(t2).Seconds() * 1000
+
+		blank = cropIsBlank(out.crop)
+		// Nothing scored at all: retry once unless the crop is a flat colour
+		// (screen off / locked), where re-capturing cannot help.
+		if len(top) > 0 || blank || attempts == detectAttempts {
+			break
+		}
+		time.Sleep(350 * time.Millisecond)
+	}
 
 	resp := map[string]interface{}{
 		"ok":          true,
 		"mode":        mode,
-		"source":      source,
-		"via":         transport,
-		"hidReleased": hidReleased,
+		"source":      out.source,
+		"via":         out.transport,
+		"hidReleased": out.hidReleased,
+		"attempts":    attempts,
 		"matched":     confident,
 		"songId":      best.SongID,
 		"title":       best.Title,
@@ -466,29 +561,18 @@ func (s *Server) handleDetectSong(w http.ResponseWriter, r *http.Request) {
 	}
 	// Blank-crop heuristic: a nearly uniform crop means the device screen is
 	// probably off, locked, or not on the game screen.
-	if srcImg != nil {
-		minV, maxV := 255, 0
-		for _, v := range srcImg.Pix {
-			if int(v) < minV {
-				minV = int(v)
-			}
-			if int(v) > maxV {
-				maxV = int(v)
-			}
-		}
-		if maxV-minV < 12 {
-			resp["blank"] = true
-		}
+	if blank {
+		resp["blank"] = true
 	}
-	if debug && q.Get("render") != "" && fullGray != nil {
+	if debug && q.Get("render") != "" && out.full != nil {
 		if q.Get("render") == "plain" {
-			resp["frameJpeg"] = grayToJpegBase64(fullGray)
+			resp["frameJpeg"] = grayToJpegBase64(out.full)
 		} else {
-			resp["frameJpeg"] = jpegWithROI(fullGray, roi)
+			resp["frameJpeg"] = jpegWithROI(out.full, roi)
 		}
 	}
 	if debug && q.Get("cropImg") != "0" {
-		resp["cropPng"] = grayToBase64(srcImg)
+		resp["cropPng"] = grayToBase64(out.crop)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -691,6 +775,25 @@ func jpegWithROI(src *image.Gray, roi [4]float64) string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
+// cropIsBlank reports whether a crop is a flat colour, which means the screen is
+// off, locked, or not showing the game — re-capturing cannot help there.
+func cropIsBlank(img *image.Gray) bool {
+	if img == nil {
+		return true
+	}
+	minV, maxV := 255, 0
+	for _, v := range img.Pix {
+		if int(v) < minV {
+			minV = int(v)
+		}
+		if int(v) > maxV {
+			maxV = int(v)
+		}
+	}
+	return maxV-minV < 12
+}
+
+// cropGray returns the normalized ROI of a grayscale frame.
 func cropGray(src *image.Gray, roi [4]float64) *image.Gray {
 	b := src.Bounds()
 	fw, fh := b.Dx(), b.Dy()
@@ -712,4 +815,53 @@ func cropGray(src *image.Gray, roi [4]float64) *image.Gray {
 		copy(out.Pix[y*out.Stride:y*out.Stride+pw], src.Pix[(y0+y)*src.Stride+x0:(y0+y)*src.Stride+x0+pw])
 	}
 	return out
+}
+
+// detInputSize returns the size to resample an OCR crop to so that the OCR
+// engine's detector preprocessing becomes an identity transform.
+//
+// go-ocr scales the long side to detMaxSideLen and then floors *both* sides to a
+// multiple of 32 (engine_paddle.go, preprocessDetImage). On a wide, thin title
+// strip that floor is destructive: the 938x96 crop of an Our Notes title was
+// resized to 480x32 — 35% of the rows thrown away, glyphs squashed 1.5x
+// vertically — and the detector then returned zero boxes, which surfaced in the
+// UI as "未匹配到歌曲, OCR 文本: []". Handing the engine an image that is already
+// the exact size it would resize to keeps the glyph aspect ratio and restores
+// detection (verified: the same crop is read correctly at 960x96).
+func detInputSize(w, h int) (int, int) {
+	if w <= 0 || h <= 0 {
+		return w, h
+	}
+	if h > w {
+		return quantize32(float64(w) * float64(detMaxSideLen) / float64(h)), detMaxSideLen
+	}
+	return detMaxSideLen, quantize32(float64(h) * float64(detMaxSideLen) / float64(w))
+}
+
+// quantize32 snaps v to the nearest multiple of 32, rounding up when rounding
+// down would cost more than 5% of the resolution: losing more than that squashes
+// the glyphs, which is exactly what breaks detection.
+func quantize32(v float64) int {
+	k := int(math.Round(v / 32))
+	if k < 1 {
+		k = 1
+	}
+	if float64(32*k) < 0.95*v {
+		k++
+	}
+	return 32 * k
+}
+
+// resampleGray scales a grayscale crop with the same kernel the OCR engine uses
+// internally, returning the source untouched when no scaling is needed.
+func resampleGray(src *image.Gray, w, h int) *image.Gray {
+	if src == nil || w <= 0 || h <= 0 {
+		return src
+	}
+	if src.Bounds().Dx() == w && src.Bounds().Dy() == h {
+		return src
+	}
+	dst := image.NewGray(image.Rect(0, 0, w, h))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Over, nil)
+	return dst
 }

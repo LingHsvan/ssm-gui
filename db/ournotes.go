@@ -33,17 +33,61 @@ type OurNotesChart struct {
 	NoteCount int    `json:"noteCount"`
 }
 
+// Language keys of OurNotesSong.Titles. They mirror the `titles` map that
+// songs.json carries for every song.
+const (
+	ourNotesLangJa     = "ja"
+	ourNotesLangEn     = "en"
+	ourNotesLangZhHans = "zh-Hans"
+	ourNotesLangZhHant = "zh-Hant"
+	ourNotesLangKo     = "ko"
+)
+
 type OurNotesSong struct {
 	ID       int      `json:"id"`
 	Title    string   `json:"title"`
 	Phonetic string   `json:"phonetic"`
 	Bands    []string `json:"bands"`
 
+	// Titles holds the same name in every language the game ships. The
+	// pre-live screen draws the Japanese one while Title carries the
+	// simplified-Chinese one, and they are not always the same words
+	// (#100030 is 「八芒星之舞」 vs 「八芒星ダンス」), so OCR of the on-screen
+	// title can only be matched with the whole set.
+	Titles map[string]string `json:"titles"`
+
 	JacketAssetName string `json:"jacketAssetName"`
 	JacketFile      string `json:"jacketFile"`
 	JacketThumbFile string `json:"jacketThumbFile"`
 
 	Charts map[string]OurNotesChart `json:"charts"`
+}
+
+// SearchTitles returns every known name of the song — the Japanese title the
+// game draws, the display title, the reading and the remaining localisations —
+// deduplicated, with the Japanese one first because it is what OCR is most
+// likely to return.
+func (s *OurNotesSong) SearchTitles() []string {
+	out := make([]string, 0, len(s.Titles)+2)
+	seen := make(map[string]struct{}, len(s.Titles)+2)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, dup := seen[v]; dup {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	add(s.Titles[ourNotesLangJa])
+	add(s.Title)
+	add(s.Phonetic)
+	for _, lang := range []string{ourNotesLangEn, ourNotesLangZhHans, ourNotesLangZhHant, ourNotesLangKo} {
+		add(s.Titles[lang])
+	}
+	return out
 }
 
 // Artist returns the band names of a song; the sibling databases expose a
@@ -182,11 +226,37 @@ type ourNotesPayloadBand struct {
 	BandName []string `json:"bandName"`
 }
 
+// payloadTitles lays the names out in the slot order the front-end expects:
+// index 0 is the original Japanese title (what a pjsk-shaped caller reads),
+// index 2 is the display title for every other mode (pickName), and the rest
+// are search-only. Slots are emitted empty rather than dropped so index 2 keeps
+// its meaning even for a songs.json that only carries `title`.
+func (s *OurNotesSong) payloadTitles() []string {
+	display := s.Title
+	if display == "" {
+		display = s.Phonetic
+	}
+	out := []string{
+		s.Titles[ourNotesLangJa],
+		s.Titles[ourNotesLangEn],
+		display,
+		s.Titles[ourNotesLangZhHant],
+		s.Titles[ourNotesLangKo],
+	}
+	// The reading is a search key only: the game never draws it, so it would
+	// be wrong at a display slot.
+	if s.Phonetic != "" && s.Phonetic != display {
+		out = append(out, s.Phonetic)
+	}
+	return out
+}
+
 // Payload renders the /api/songdb?mode=ournotes body in the same shape the
 // BanG branch uses, so the front-end's normalizeSongDB needs no special case:
 //   - songs is an OBJECT keyed by song id
-//   - musicTitle[2] holds the display title (pickName prefers index 2 for
-//     non-pjsk modes and index 0 for pjsk, so both carry the title)
+//   - musicTitle carries every localisation, with the display title at index 2
+//     (pickName prefers index 2 for non-pjsk modes) and the Japanese one at
+//     index 0
 //   - bands is a synthesized table so db.bands[song.bandId].bandName works
 //   - difficulty keys are the front-end's 0..3 indices
 func (d *OurNotesDB) Payload() ([]byte, error) {
@@ -226,14 +296,10 @@ func (d *OurNotesDB) Payload() ([]byte, error) {
 			}
 		}
 
-		title := s.Title
-		if title == "" {
-			title = s.Phonetic
-		}
 		// A song without a band (tie-up tracks) gets bandId 0, which simply
 		// resolves to no artist on the front-end.
 		songs[strconv.Itoa(s.ID)] = &ourNotesPayloadSong{
-			MusicTitle: []string{title, s.Phonetic, title},
+			MusicTitle: s.payloadTitles(),
 			Difficulty: diffs,
 			BandID:     bandID[firstBand(s)],
 		}
